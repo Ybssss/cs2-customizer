@@ -6,7 +6,14 @@
 > planned, what was tried and rejected, and which claims in the code and in older documents are already
 > known to be wrong. Read it, then verify the specific claim you are about to rely on, in source.
 >
-> **Latest state (2026-09-28, tenth pass):** The first v2.3.1 attempt after deleting the broken
+> **Latest state (2026-09-28, eleventh pass):** The check now runs, prints, and gets to the actual
+> work — and fails on **its own half-applied refactor**: `main()` resolved the exe, validated it,
+> printed it, and then handed `args.exe` (which is `None` when the workflow calls it with no
+> argument) to `archive_viewer`, producing `Archive None does not exist!` (run 36422318501, step 7).
+> I had changed two of the three places that use `exe` and left the third. Two new tests drive
+> `main()` end to end — the discovered-exe identity and the missing-module failure — which is the
+> path no judge had exercised (entry 13). The bundle itself is *still* unverified: three runs in a row
+> have been lost to the check's own plumbing before it ever reported on a product. Earlier in this pass: The first v2.3.1 attempt after deleting the broken
 > Release failed at the **new bundle check**, on its very first run — and not because of the bundle:
 > `check_frozen_bundle.py` died with `UnicodeEncodeError: 'charmap' codec can't encode characters`
 > printing its own first Chinese line. The runner's console is cp1252. It performed **zero**
@@ -751,6 +758,46 @@ plumbing before it ever reported on a product.
 
 **Supersedes.** Nothing.
 
+### 🟡 Entry 13: A half-applied refactor fed `None` to the archive reader (2026-09-28)
+
+**What / why.** Run 36422318501 passed `pip install` and the onedir build, and the bundle check — for
+the first time — got past printing and into the work:
+
+    RuntimeError: archive_viewer 读不了 None（退出码 1）
+    Archive None does not exist!
+
+**What was wrong.** Entry 11 gave the script an optional positional argument plus a `find_exe()`
+discovery, so `main()` began with `exe = args.exe or find_exe()`. I updated the guard and the INFO
+line to use `exe` — **and left the third call site on `args.exe`**, which is `None` whenever the
+workflow invokes the script with no argument, which is exactly how it invokes it. So the script found
+the artifact, validated it, printed it, and then handed `None` to the archive reader.
+
+⭐ **三次"判据指向了错的东西"里的第三次**，而且前两次就在同一个文件里：
+1. 顺序判据拿一个已经被删掉的字符串当锚点（entry 11）——永远绿；
+2. cp1252 那条判据盯的是 stderr，而炸掉的是 stdout（entry 12）——删掉修复照样绿；
+3. 这一次，`main()` 的**发现路径根本没有任何判据走过**：解析器被单独测了，`find_exe` 只测了
+   "多于一个候选"那个分支，cp1252 那条只测打印。**三条判据都在量这个脚本的碎片，没有一条
+   量它自己怎么被调用。**
+
+**Changed.** `build_tools/check_frozen_bundle.py` — `main()` uses the resolved `exe` in all three
+places, with the reason written at the call site that was wrong.
+`tests/test_runtime_dependency_coverage.py` 9 → 11 cases: two new tests drive `main()` end to end,
+one asserting the object handed to `archive_listing` **is** the discovered exe, one asserting a
+missing module produces exit 1 and names the module.
+
+**Decision(s).** none new; this is a defect fix against D26.
+
+**Verified.** 11 passed; ruff clean. Re-introducing `missing_modules(args.exe, …)` turns **two** tests
+red; removing the UTF-8 reconfigure turns one red. One mutation deliberately not guarded: putting
+`args.exe` back into the *failure message* text (cosmetic — the message would read `None` instead of
+the path; the exit code and the named module are still correct).
+**Not verified:** the bundle check on a real product build. Three consecutive runs have now been lost
+to the check's own code before it reported anything about the artifact.
+
+**Not done / open.** `PROGRESS.md` is past 850 lines and needs compaction.
+
+**Supersedes.** Nothing.
+
 ---
 
 ## 4. Known drift and superseded claims
@@ -793,6 +840,7 @@ remembered from a superseded source is unverified until re-checked.
 | Changelog extraction | Local run of the embedded python for `2.3.1` and `9.9.9` | found / exit 1 | 2026-09-28 |
 | Mutation checks on `release.yml` | drop `build`/`ci` `if:` · `--target` -> `main` · always-release · drop `gh release view` | each red; restore green | 2026-09-28 |
 | Full test matrix | `python build_tools/run_tests.py` | **not run** — needs pytest on the project interpreter | — |
+| Bundle check | run 36422318501, step 7 | printed fine, then `Archive None does not exist!` — the check fed `args.exe` (None) to the reader. Fixed, not yet re-run | 2026-09-28 |
 | Bundle check | run 36418436440, step 7 | **failed on its own printing** (`UnicodeEncodeError`, cp1252); zero comparisons performed. Fixed by D27, not yet re-run | 2026-09-28 |
 | **Published Release** | launch the v2.3.1 exe | **`No module named 'flask'` — the artifact did not run.** Release + tag deleted (owner-approved); fix D24/D25/D26 in, not yet re-run | 2026-09-28 |
 | Real release run | run 36415053429 | **success** — Release v2.3.1 created with the installer attached | 2026-09-28 |

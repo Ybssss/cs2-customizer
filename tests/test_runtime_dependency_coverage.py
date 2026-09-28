@@ -193,6 +193,58 @@ def test_bundle_check_refuses_to_pick_between_several_builds(tmp_path):
         bundle.find_exe(tmp_path)
 
 
+def test_main_passes_the_discovered_exe_not_the_parsed_argument(tmp_path, monkeypatch, capsys):
+    """不传参调用时，传给 archive_viewer 的必须是**找到的那个** exe，而不是 None。
+
+    ⭐ 这是判据记下的第三次"指向了错的东西"：2026-09-28 的 run 36422318501 第 7 步，
+    脚本明明找到了产物、还把它打印了出来，却把 `args.exe`（不传参时就是 `None`）交给了
+    archive_viewer，于是 `Archive None does not exist!`。那次重构改了三个用到 exe 的地方，
+    **只改了两个**——而当时所有判据都在量别的：解析器、`find_exe` 的"多于一个"分支、
+    cp1252 打印。**没有一条走 main() 的发现路径。**
+
+    所以这里盯的不是某一行文本，而是"main 不传参时**真正传下去的对象**是哪个"。
+    """
+    exe = tmp_path / "CS2 Customizer 9.9.9" / "CS2 Customizer.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(bundle, "find_exe", lambda root=None: exe)
+    monkeypatch.setattr(bundle, "third_party_imports", lambda: {"flask"})
+    monkeypatch.setattr(
+        bundle, "archive_listing",
+        lambda path, python=None: seen.setdefault("exe", path) and "" or "flask\n")
+    monkeypatch.setattr(bundle, "internal_top_level", lambda d: set())
+
+    code = bundle.main([])
+    capsys.readouterr()
+
+    assert seen.get("exe") == exe, (
+        f"传给 archive_viewer 的是 {seen.get('exe')!r}，应当是找到的产物 {exe}。"
+        "把 args.exe 传给归档读取，就是 run 36422318501 里那个 `Archive None does not exist!`。"
+    )
+    assert code == 0, f"模块齐了应当返回 0，实际 {code}"
+
+
+def test_main_fails_when_a_module_is_absent_from_the_bundle(tmp_path, monkeypatch, capsys):
+    """反向：产物里真的少一个模块时，main 必须红，且把缺的那个点名。"""
+    exe = tmp_path / "CS2 Customizer 9.9.9" / "CS2 Customizer.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+
+    monkeypatch.setattr(bundle, "find_exe", lambda root=None: exe)
+    monkeypatch.setattr(bundle, "third_party_imports", lambda: {"flask", "pygame"})
+    monkeypatch.setattr(bundle, "archive_listing", lambda path, python=None: "pygame\n")
+    monkeypatch.setattr(bundle, "internal_top_level", lambda d: set())
+
+    code = bundle.main([])
+    out = capsys.readouterr()
+
+    assert code == 1, f"缺包时必须返回 1，实际 {code}"
+    assert "flask" in out.err, f"报错要点名缺的是 flask，实际 stderr:\n{out.err[:300]}"
+
+
 def test_bundle_check_can_print_on_a_cp1252_console(tmp_path):
     """核对脚本在 cp1252 控制台上必须能**打印**,而不是死在打印上。
 

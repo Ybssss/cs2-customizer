@@ -151,12 +151,17 @@ def main(argv: list[str] | None = None) -> int:
     required = third_party_imports()
     print(f"[INFO] 启动必需的第三方模块 ({len(required)}): {', '.join(sorted(required))}")
 
-    missing = missing_modules(args.exe, required, args.python)
+    # ⚠ 这里曾经写成 `missing_modules(args.exe, …)`，而 `args.exe` 在"不传参"的调用方式下
+    # 是 None —— 脚本已经找到并打印了产物，却把 None 交给了 archive_viewer，于是
+    # "Archive None does not exist!"（run 36422318501 第 7 步）。
+    # 教训不止于这一行：那次重构改了三个用到 exe 的地方，**只改了两个**。
+    # 所以下面那条判据盯的是"main 不传参时真正传下去的是哪个对象"，不是某一行文本。
+    missing = missing_modules(exe, required, args.python)
     if missing:
         print("", file=sys.stderr)
         print(
             f"[FAIL] 这些模块在产物里找不到：{', '.join(sorted(missing))}\n"
-            f"       查的是 {args.exe} 的 PYZ 归档，以及同级的 _internal\\ 目录。\n"
+            f"       查的是 {exe} 的 PYZ 归档，以及同级的 _internal\\ 目录。\n"
             "       ⇒ 装依赖的那一步漏了包（看 .github/workflows/build-installer.yml 的 pip install），\n"
             "         或者 PyInstaller 没把它冻进去（需要 hidden-import）。\n"
             "       这个产物**装到用户机器上也是起不来的**——事故 v2.3.1 就是这么发出去的。",
