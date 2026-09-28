@@ -82,13 +82,26 @@ def top_level_names(listing: str) -> set[str]:
 
 
 def internal_top_level(internal_dir: Path) -> set[str]:
-    """`_internal/` 里 C 扩展的顶层模块名（`win32api.pyd` -> `win32api`）。"""
+    """`_internal/` 里 C 扩展的模块名。
+
+    ⭐ 目录名**和**文件名主干都要记，而且这条是被一次真实误判逼出来的：
+    2026-09-28 的 run 36427334265 报"产物里缺 win32api / win32gui / win32process"，
+    而实测一次真的 onedir 构建，它们就在
+    `_internal\win32\win32api.pyd` —— **嵌在 win32 子目录里**。只取第一段路径就只
+    看得见 `win32`，于是**一个完全正确的产物被判红**。
+    （同一个坑在同一个文件的两个函数里各犯一次：`top_level_names` 先犯，已修；
+    `internal_top_level` 后犯，就是这一条。⚠ 同一个错在一处修好、另一处留着，
+    比两处都错更难发现——因为你会以为这个错已经处理过了。）
+    """
     if not internal_dir.is_dir():
         return set()
     out: set[str] = set()
     for path in internal_dir.rglob("*.pyd"):
         parts = path.relative_to(internal_dir).parts
-        out.add(parts[0].lower())
+        for part in (parts[0], parts[-1]):
+            stem = part.rsplit(".", 1)[0]        # 去掉 .pyd，模块名不带扩展名
+            if stem:
+                out.add(stem.lower())
     return out
 
 

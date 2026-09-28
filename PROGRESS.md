@@ -6,7 +6,16 @@
 > planned, what was tried and rejected, and which claims in the code and in older documents are already
 > known to be wrong. Read it, then verify the specific claim you are about to rely on, in source.
 >
-> **Latest state (2026-09-28, thirteenth pass):** The bundle check did its job on its first
+> **Latest state (2026-09-28, fourteenth pass):** **The last two runs were false reds from my own
+> checker.** Run 36427334265 reported `win32api / win32gui / win32process` missing, and I went to fix
+> the build again. Instead of another CI cycle, I built a real onedir bundle locally with the same
+> `--paths` and looked: the extensions were there the whole time, at
+> `_internal\win32\win32api.pyd` — **nested one level**. `internal_top_level` recorded only the
+> first path segment, so it saw `win32` and reported `win32api` absent (entry 16). Running the
+> checker's own functions over that real bundle reproduces the false red exactly, and reports
+> `missing: []` after the fix. So the pywin32 build fix (D30) was correct and the diagnostic was wrong.
+> The method came from the owner's `gufan0000/repro-agent` (D31): get evidence, and treat budget
+> exhaustion as "write the report", never as "guess harder". Earlier in this pass: The bundle check did its job on its first
 > real product: run 36424381580 installed cleanly (the retry fix worked), built the onedir tree, and
 > the check reported a **genuine** defect — `win32api`, `win32gui`, `win32process` absent from the
 > bundle, while `flask` was present (so the runtime fix landed). Cause: pywin32 ships its `.pyd` files
@@ -192,6 +201,7 @@ Mark items the owner delegated to the agent as _(delegated)_.
 | **D12** | Release notes and the tag name take their version from `needs.preflight.outputs.version`, never from `GITHUB_REF_NAME`. | At publish time the tag does not exist yet, so there is no ref name to derive a version from. |
 | **D14** | The `ci` gate job carries its own `concurrency`: group `release-gate-${{ github.ref }}`, `cancel-in-progress: false`, and **no `github.workflow` in the group**. | Fixes the self-cancelling gate of entry 4. The invariant is "the gate's group must not depend on `github.workflow`", because in a reusable call that value is not ours to control. |
 | **D17** | **Supersedes D14.** The real fix is in **`ci.yml`**: its `concurrency.group` now uses `${{ github.workflow_ref }}-${{ github.ref }}` (the *caller's* workflow path) instead of `${{ github.workflow }}-${{ github.ref }}`. The caller-side `concurrency` from D14 is **removed** — two mechanisms overlap, and D14 demonstrably did not work. | D14 was tried and disproved by run 36402772836, which failed identically with D14 in place. Invariant, now guarded by a test: a workflow that gets reused must not key its concurrency group on `github.workflow`. |
+| **D31** | When a diagnosis loop repeats, stop changing the build and get evidence **on this machine** — a throwaway PyInstaller build, a direct run of the checker's own functions, a string check. Consult `gufan0000/repro-agent` for the discipline. | Its policy section: everything readable is *evidence*, and budget exhaustion is defined as **write the report**, because "a model that is running out of room and has been told only to 'be efficient' starts guessing more aggressively, which is exactly when it does damage". Two runs and two build edits were spent on a defect the build never had. |
 | **D30** | The generated PyInstaller spec's `pathex` includes pywin32's extension directory, located at build time via `importlib.util.find_spec("win32api")`; the pywin32 module names are also listed as hidden imports. | PyInstaller's Analysis does not execute `.pth`, and pywin32's `.pyd` files live only in the directory that `.pth` adds. Verified on a throwaway build both ways. Located rather than hardcoded, because pip's layout varies by version. |
 | **D28** | The packaging `pip install` runs with `--retries 10 --timeout 120`, and the reason is written in the workflow. | A single PyPI read timeout on `/simple/click/` was reported by pip as `ResolutionImpossible` / "no matching distributions available for your environment", under a list of `flask … depends on click>=8.1.3` that reads like a version conflict. Editing version bounds fixes nothing. |
 | **D29** | All three requirements files carry **ASCII-only comments**; every package and version bound is byte-identical to before. The narrative stays in `PROGRESS.md`. | pip decodes requirements files with the machine's locale codec, not UTF-8. On the owner's own Chinese Windows box (cp936) `pip install -r requirements_qt.txt` raised `UnicodeDecodeError` before resolving anything — and that file is the first line of both READMEs' install instructions. A requirements file is read by a machine; it is not a place for prose in a specific language. |
@@ -925,6 +935,56 @@ the wrong separator. The `--paths` mechanism itself is proven on a real PyInstal
 
 **Supersedes.** Nothing.
 
+### 🔴 Entry 16: Two false reds — the check was wrong, not the build (2026-09-28)
+
+**What / why.** Run 36427334265 reported `win32api, win32gui, win32process` missing again, after D30
+had put pywin32's directory on the spec's `pathex`. My own `[WARN]` for "couldn't find the pywin32
+directory" had **not** printed, so the directory was found and the fix was applied — and the modules
+were still reported missing. The obvious next move was to change the build again.
+
+**The evidence instead**, produced locally in about a minute: a real `--onedir` PyInstaller build of
+a four-line script with the same `--paths`, then `Get-ChildItem -Recurse -Filter "win32*.pyd"`:
+
+    _internal\win32\win32api.pyd
+    _internal\win32\win32gui.pyd
+    _internal\win32\win32process.pyd
+
+They are in the bundle, **nested one level under a `win32` subdirectory**. Feeding that real tree to
+the checker's own functions:
+
+    internal_top_level -> ['_bz2.pyd', ..., 'win32']
+    missing per current code: ['win32api', 'win32gui', 'win32process']
+
+**So the false red is reproduced, and the cause is `internal_top_level` taking only the first path
+segment** — it saw `win32` and never looked at the file stem. After the fix, the same real tree
+reports `missing: []`.
+
+**The uncomfortable part, recorded rather than buried.** This is the **same bug, in the same file,
+in the sibling function** — `top_level_names` had it and was fixed one commit earlier; I fixed that
+one and left this one. A repeated mistake fixed in one place and left in another is harder to spot
+than one never fixed, because it makes you believe the class of problem is handled. Entry 15's
+finding was therefore half right: pywin32 *is* a real PyInstaller trap (D30 is a real fix, and it is
+what put those `.pyd` files there), but the *verdict* drawn from the run was wrong, and I acted on it.
+
+**Changed.** `build_tools/check_frozen_bundle.py` — `internal_top_level` records the directory name
+**and** the file stem, and strips the `.pyd` extension so the set holds module names.
+`tests/test_runtime_dependency_coverage.py` — the storage-location test rebuilt around the **real**
+nested layout rather than the flat one I had invented, so the layout is evidence, not a guess.
+
+**Decision(s).** D31 (method), and the correction of entry 15's verdict.
+
+**Verified.** 15 passed; ruff clean. Three mutations go red: internal scan back to first-segment-only,
+internal scan forgetting the file stem, archive parser back to first-segment-only. The decisive
+evidence is the local reproduction: a real onedir bundle, the checker's own functions, `missing: []`.
+
+**Not verified:** the run. The next run is the first one where the check's verdict can be believed —
+and if it reports a module missing now, that report is the first trustworthy one in this series.
+
+**Not done / open.** `PROGRESS.md` is past 1000 lines and needs compaction.
+
+**Supersedes.** Entry 15's conclusion that the artifact was still missing pywin32. Its root-cause
+analysis (D30) stands; its verdict did not.
+
 ---
 
 ## 4. Known drift and superseded claims
@@ -967,7 +1027,9 @@ remembered from a superseded source is unverified until re-checked.
 | Changelog extraction | Local run of the embedded python for `2.3.1` and `9.9.9` | found / exit 1 | 2026-09-28 |
 | Mutation checks on `release.yml` | drop `build`/`ci` `if:` · `--target` -> `main` · always-release · drop `gh release view` | each red; restore green | 2026-09-28 |
 | Full test matrix | `python build_tools/run_tests.py` | **not run** — needs pytest on the project interpreter | — |
-| Bundle check | run 36424381580, step 7 | **worked**: `flask` present (runtime fix confirmed), reported `win32api / win32gui / win32process` missing. Real defect, D30, not yet re-run | 2026-09-28 |
+| Bundle check | run 36424381580, step 7 | `flask` present (runtime fix confirmed); reported the three pywin32 modules missing — verdict **wrong**, see entry 16 | 2026-09-28 |
+| Bundle check | run 36427334265, step 7 | same three reported missing — **false red**, reproduced locally: they are in `_internal\win32\`. Fixed, not yet re-run | 2026-09-28 |
+| Bundle check, local | real onedir build + the checker's own functions | `missing: []` after the fix (was the three) | 2026-09-28 |
 | Install step | run 36423164375, step 5 | `ResolutionImpossible` on `click` — actually a PyPI read timeout (D28). Not yet re-run | 2026-09-28 |
 | Bundle check | run 36422318501, step 7 | printed fine, then `Archive None does not exist!` — the check fed `args.exe` (None) to the reader. Fixed, not yet re-run | 2026-09-28 |
 | Bundle check | run 36418436440, step 7 | **failed on its own printing** (`UnicodeEncodeError`, cp1252); zero comparisons performed. Fixed by D27, not yet re-run | 2026-09-28 |

@@ -265,19 +265,34 @@ def test_build_puts_the_pywin32_extension_dir_on_the_analysis_path():
 
 
 def test_bundle_check_reads_both_storage_locations(tmp_path):
-    """onedir 的纯 Python 在 exe 的 PYZ 里，C 扩展在 `_internal/` —— 两处都要看。
+    """onedir 的纯 Python 在 exe 的 PYZ 里，C 扩展在 `_internal/` —— 两处都要看，
+    而且 `_internal/` 里的扩展**可能嵌在子目录里**。
 
-    只看其中一处，就会对另一种包给出假红；而在 v2.3.1 那种"缺包"的事故里，
-    假红至少是吵的，**假绿是致命的**。
+    ⭐ "嵌在子目录里"这一条是 run 36427334265 的实测结论：pywin32 的三个扩展真的落在
+    `_internal\win32\win32api.pyd`。只取第一段路径的版本会得出"win32 在、win32api 不在"，
+    **把一个完全正确的产物判成缺包**——我因此又去改了构建，而构建本来是对的。
+    同一个错在同一个文件的两个函数里各犯一次：`top_level_names` 先犯已修，
+    `internal_top_level` 后犯。⚠ 同一个错修了一处、留着另一处，比两处都错更难发现，
+    因为你会以为这个错已经处理过了。
+
+    这里的目录布局照抄一次真实 onedir 构建的形状，不是随手编的。
     """
     internal = tmp_path / "_internal"
-    (internal / "win32api").mkdir(parents=True)
-    (internal / "win32api" / "win32api.pyd").write_bytes(b"x")
-    (internal / "soundfile").mkdir(parents=True)
-    (internal / "soundfile" / "soundfile.pyd").write_bytes(b"x")
+    for sub, name in (("win32", "win32api"), ("win32", "win32gui"),
+                      ("win32", "win32process"), ("", "soundfile")):
+        d = internal / sub if sub else internal
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.pyd").write_bytes(b"x")
+
     found = bundle.internal_top_level(internal)
-    must_scan(found, "_internal 里的顶层名", least=2)
-    assert found == {"win32api", "soundfile"}, found
+    must_scan(found, "_internal 里的名字", least=4)
+    for expected in ("win32api", "win32gui", "win32process", "soundfile"):
+        assert expected in found, (
+            f"{expected} 没被认出来，实际 {sorted(found)}。"
+            "嵌在子目录里的扩展只报目录名，会把正确的产物判成缺包。"
+        )
+    # 目录名也要留着：某些包确实以目录形式存在，丢掉它会漏判
+    assert "win32" in found, sorted(found)
 
 
 def test_bundle_check_refuses_to_pick_between_several_builds(tmp_path):
