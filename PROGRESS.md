@@ -6,17 +6,15 @@
 > planned, what was tried and rejected, and which claims in the code and in older documents are already
 > known to be wrong. Read it, then verify the specific claim you are about to rely on, in source.
 >
-> **Latest state (2026-09-28):** The owner (fork maintainer) asked for a GitHub Action that publishes a
-> Release with the Windows installer; the repository had no Release at all. Done: `.github/workflows/release.yml`
-> as a **push-to-`main` auto-release** — bump `VERSION` in `config.py`, push, and the pipeline gates on CI,
-> packages, creates the Release **and creates the tag itself** (`--target $GITHUB_SHA`); `ci.yml` and
-> `build-installer.yml` got `workflow_call:` so the release reuses the real packaging chain instead of a copy;
-> a cheap `preflight` job short-circuits every push that does not bump the version (so ordinary pushes cost
-> nothing); both READMEs were corrected — they still claimed the repository publishes no binaries;
-> `tests/test_release_wiring.py` (9 cases) guards the wiring. **Nothing is committed or pushed.** The moment
-> this lands on `main` it publishes **v2.3.1**, because `VERSION` is already `2.3.1` and no Release exists —
-> read section 3 entry 3 before approving a push. `CHANGELOG.md` still marks `## [2.3.1]` as 开发中
-> (only the section body goes into the notes, not the marker). Local test runs need the isolated venv in
+> **Latest state (2026-09-28, later):** The release pipeline is built, pushed, and **has run once — it
+> failed, and no Release exists** (entry 4). Root cause found and fixed: the `ci` gate job called `ci.yml`
+> as a reusable workflow and landed in **the same `concurrency` group as the standalone `ci` run for that
+> same push**, whose `cancel-in-progress: true` cancelled the release's own gate. The `ci` job now carries
+> its own group (`release-gate-<ref>`, no `github.workflow`, no cancel). Owner decisions since entry 3:
+> the Release carries **exactly one asset, the .exe**, with the SHA256 moved into the release notes body;
+> and the owner was told plainly that **this project has no Android/APK build** (Windows-only PyQt5 —
+> Magnification API, GSI, cfg writes, pywin32 autostart; an APK would be a separate port, not a flag).
+> The next push to `main` publishes **v2.3.1** for real. Local test runs need the isolated venv in
 > section 5 — no project Python has pytest.
 
 ---
@@ -103,6 +101,9 @@ Mark items the owner delegated to the agent as _(delegated)_.
 | **D10** | **The release trigger is the version, not the commit.** A `preflight` job compares `config.VERSION` against existing Releases and short-circuits the rest of the graph. | A per-commit Release is a different product (a prerelease track) and was not asked for. This way an ordinary push starts zero Windows runners. |
 | **D11** | `gh release create` uses `--target "$GITHUB_SHA"`, and **no** `--verify-tag`. A remote tag that exists without a Release is a **hard failure**, not a publish. | The tag must be created *by* this run at the pushed commit. `--verify-tag` here would be a chicken-and-egg deadlock; the stale-tag case would otherwise attach a Release to an unknown commit. |
 | **D12** | Release notes and the tag name take their version from `needs.preflight.outputs.version`, never from `GITHUB_REF_NAME`. | At publish time the tag does not exist yet, so there is no ref name to derive a version from. |
+| **D14** | The `ci` gate job carries its own `concurrency`: group `release-gate-${{ github.ref }}`, `cancel-in-progress: false`, and **no `github.workflow` in the group**. | Fixes the self-cancelling gate of entry 4. The invariant is "the gate's group must not depend on `github.workflow`", because in a reusable call that value is not ours to control. |
+| **D15** | The Release carries **exactly one asset**, the installer `.exe`. The SHA256 moves into the release notes body. | Owner's decision (they asked for "only exe apk", then learned there is no APK). The checksum still ships, and a downloader of only the exe still sees it. |
+| **D16** | This project has **no Android build and no APK is planned**. | It is a Windows-only PyQt5 app: Windows Magnification API, GSI, cfg writes, pywin32 autostart. An APK is a separate port with its own toolchain, not a build flag. Owner informed 2026-09-28. |
 | **D13** | The `ci` job runs again inside `release.yml` on the pushes that actually publish, duplicating the standalone `ci.yml` run for the same push. | Accepted deliberately: the "wait for another workflow" patterns (`workflow_run`) need re-run, staleness and cross-workflow state handling, which is far more machinery than the saved runner minutes. Duplication only happens on version-bump commits. |
 
 ---
@@ -225,6 +226,48 @@ owner deferred the changelog-heading and installer-identity questions to the aut
 
 **Supersedes.** Entry 1's manual-tag trigger and its `build-installer.yml`-header claim; D6.
 
+### ✅ Entry 4: First run failed — the CI gate cancelled itself (2026-09-28)
+
+**What / why.** The first real execution of the pipeline, triggered by the push of entry 3. It
+failed, and **no Release was created** — the failure is harmless to the outside world and worth
+reading precisely, because the symptom pointed at nothing that was actually broken.
+
+**Observed (run 36401751401, head 040f485).** `preflight` succeeded and logged
+"v2.3.1 还没发过"; `build` and `publish` were `skipped`; **the `ci` job produced no job record at
+all**; run conclusion `failure`. `actionlint` 1.7.12 reported **zero problems** for all three
+workflow files, so this was not a schema error — the job was destroyed at scheduling time.
+
+**Root cause.** `ci.yml` carries
+`concurrency: {group: ${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true}`. In a
+**called** reusable workflow, `github.workflow` is not a value this repository controls — it can
+resolve to the callee (`ci`). When it does, the release's gate job and the **standalone** `ci.yml`
+run for the same push land in the **same concurrency group**, and `cancel-in-progress: true` makes
+them cancel each other. Both runs started 09:09:57; preflight finished 7 seconds later, inside the
+window.
+
+**Changed.** `.github/workflows/release.yml` — the `ci` gate job now declares
+`concurrency: {group: release-gate-${{ github.ref }}, cancel-in-progress: false}`; the reason is
+written into the file so the next person does not "clean it up". `tests/test_release_wiring.py`
+grew to 11 cases: `test_release_gate_does_not_cancel_itself` (the group must not mention
+`github.workflow`, and must not cancel) and `test_release_contains_only_the_installer` (D15).
+`README.md` / `README.en.md` — the asset list is now one exe with the checksum in the notes.
+
+**Decision(s).** D14, D15, D16.
+
+**Verified.** 11 passed; ruff clean; `actionlint` clean on all three workflows. Five new mutations
+each turned the file red and restoring turned it green: delete the gate's `concurrency`, put
+`github.workflow` back in the group, set `cancel-in-progress: true`, re-add the `.sha256` as an
+asset, and stop writing the checksum into the notes. **Not verified:** that the fix actually lets
+the gate start — only a real run proves that, and the next push is that proof.
+
+**Not done / open.** The pipeline is unproven end to end: `ci` gate start, PyInstaller, Inno, the
+artifact round trip, and `gh release create --target` have still never run. The next push to `main`
+publishes v2.3.1 for real (owner's explicit approval, 2026-09-28).
+
+**Supersedes.** Nothing; this is the first execution record. Corrects the entry 1/3 claim that the
+graph was ready — it was correct on paper and wrong at runtime, which is why "verified on a runner"
+was and stays a separate line in every entry.
+
 ---
 
 ## 4. Known drift and superseded claims
@@ -238,6 +281,7 @@ remembered from a superseded source is unverified until re-checked.
 | `README.en.md` line 37 (pre-2026-09-28) | "**This repository publishes no Release binaries.**" | Same, English side. | Rewritten in place. |
 | `README.md` / `README.en.md` build section | "**不进 Release**" about `build-installer.yml` | Still true of that workflow alone; it is no longer true of the tag path as a whole. | Kept, re-scoped to "when run on its own". |
 | `build-installer.yml` header | "**它不发布 Release。**" / "本仓库不做二进制分发渠道" | The first half is still true of this file; the second is no longer true of the repository. | Header rewritten to state both halves. |
+| Entries 1 and 3 (2026-09-28) | "The job graph is ready; first proof is a tag push." | The first run cancelled its own CI gate (entry 4). Paper-correct, runtime-wrong. | Superseded by D14 and entry 4. |
 | Decision D6 (2026-09-28, entry 1) | "Publication trigger is a `v*` tag push only. No manual-dispatch release path." | The pipeline now runs on `push` to `main` and creates the tag itself. | Superseded by D9; kept in the table as history, do not act on it. |
 
 ---
@@ -254,14 +298,15 @@ remembered from a superseded source is unverified until re-checked.
 
 | Check | Command | Last result | Date |
 | ----- | ------- | ----------- | ---- |
-| Release wiring tests | `python -m pytest tests/test_release_wiring.py -q` | 9 passed (isolated venv); 5 mutations of release.yml each turn it red | 2026-09-28 |
+| Release wiring tests | `python -m pytest tests/test_release_wiring.py -q` | 11 passed (isolated venv); 10 mutations of release.yml each turn it red | 2026-09-28 |
+| Workflow schema | `actionlint.exe .github/workflows/*.yml` (v1.7.12) | 0 problems, all three files | 2026-09-28 |
 | Adjacent workflow/brand suites | `python -m pytest tests/test_version_consistency.py tests/test_no_legacy_brand.py tests/test_the_index_gate_is_wired_into_ci.py tests/test_audit_coverage_r11.py tests/test_ci_gates_read_the_verdict_line.py -q` (one file per process) | 37 passed, 1 skipped | 2026-09-28 |
 | Lint (new file) | `python -m ruff check tests/test_release_wiring.py` | All checks passed | 2026-09-28 |
 | Workflow YAML parses | PyYAML `safe_load` over `.github/workflows/*.yml` | 3/3 parsed, jobs as expected | 2026-09-28 |
 | Changelog extraction | Local run of the embedded python for `2.3.1` and `9.9.9` | found / exit 1 | 2026-09-28 |
 | Mutation checks on `release.yml` | drop `build`/`ci` `if:` · `--target` -> `main` · always-release · drop `gh release view` | each red; restore green | 2026-09-28 |
 | Full test matrix | `python build_tools/run_tests.py` | **not run** — needs pytest on the project interpreter | — |
-| Real release run | push a `v*` tag | **not run** — no Actions run has happened | — |
+| Real release run | `gh run view 36401751401` | **failed**: preflight ok, `ci` job never created, build/publish skipped, no Release. Fixed by D14, not yet re-run | 2026-09-28 |
 
 Isolated venv used for the runs above (created by the agent, outside the repo):
 `C:\Users\YB\AppData\Local\Temp\opencode\cs2venv` (Python 3.11 + `pytest`, `PyYAML`, `ruff`).

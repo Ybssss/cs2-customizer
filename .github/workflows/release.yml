@@ -1,5 +1,9 @@
 # 发布流水线:**抬了版本号就自动发版**,不需要人工打 tag。
 #
+# Release 附件**只有一个文件**:`CS2Customizer-Setup-<版本>.exe`。安装包 exe 就是全部,
+# 校验和写进发布说明正文(不是第二个附件)——只下 exe 的人不会漏掉它,而下载页面上
+# 也不会多出一个没人点的文件。
+#
 # 触发:`main` 每次 push(以及手工推 `v*` tag)。**不是每个 commit 都发**——
 # 发版的触发点是 `config.py` 的 `VERSION` 变了。preflight 作业会比对
 # "当前 VERSION" 和 "已经存在的 Release",一致就整条链路跳过。
@@ -82,6 +86,21 @@ jobs:
   ci:
     needs: preflight
     if: needs.preflight.outputs.should_release == 'true'
+    # ⚠⚠ 这一段是被一次真实事故逼出来的,别删。
+    # 首次运行(2026-09-28,run 36401751401)的现象是:preflight 成功,而这个作业**连作业
+    # 记录都没产生**,build / publish 变成 skipped,整条 run 记 failure。actionlint 说三个
+    # workflow 都合法,所以不是语法问题,是调度期被取消。
+    # 原因:ci.yml 自己带
+    #     concurrency: {group: ${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true}
+    # 而**被调用的** workflow 里 `github.workflow` 是谁的名字并不由我们决定(它可能是
+    # 调用方 `release`,也可能是被调方 `ci`)。取后者时,本作业和同一次 push 上独立跑的那条
+    # ci.yml 落进**同一个 concurrency group**,而 cancel-in-progress: true —— 于是发版这道
+    # 门禁把自己取消了。两条流水线同一秒启动,窗口正好对上。
+    # 修法:给这个调用作业一个**不依赖 github.workflow 的、只属于发版的** group。
+    # 写死前缀 + refs,两侧不可能再撞;cancel-in-progress: false,排队而不是互砍。
+    concurrency:
+      group: release-gate-${{ github.ref }}
+      cancel-in-progress: false
     uses: ./.github/workflows/ci.yml
 
   # 2) 打包:PyInstaller onedir + Inno Setup 编译安装包,算 SHA256,传 artifact。
@@ -154,7 +173,22 @@ jobs:
           PY
           cat release-notes.md
 
-      - name: 建 Release、打 tag、上传附件
+      - name: 把校验和写进发布说明
+        # Release 里**只留一个 exe**(那是别人唯一会下的东西)。校验和不是没有,
+        # 而是从附件挪进说明正文:它跟着说明走,不会有人只下 exe 却漏掉它。
+        shell: bash
+        run: |
+          {
+            echo ""
+            echo "### SHA256"
+            echo ""
+            echo '```'
+            cat dist/*.sha256
+            echo '```'
+          } >> release-notes.md
+          tail -n 6 release-notes.md
+
+      - name: 建 Release、打 tag、上传安装包
         shell: bash
         run: |
           # --target:tag 不存在时由 gh 在**当前这次 push 的提交**上建出来,
@@ -164,6 +198,6 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "CS2 Customizer $VERSION" \
             --notes-file release-notes.md \
-            dist/*.exe dist/*.sha256
+            dist/*.exe
           echo "----"
           gh release view "v$VERSION"

@@ -34,7 +34,7 @@
 > **本仓库的 Release 里就有安装包。** 改了 `config.py` 的版本号并 push 到 `main`，
 > [`.github/workflows/release.yml`](.github/workflows/release.yml) 自动跑 CI 全量门禁、
 > 在 Windows 上构建、建 Release（并打上 tag），附件是 `CS2Customizer-Setup-<版本>.exe`
-> 和它的 `.sha256`——**这就是本仓库这份 GPL-3.0 源码的构建产物**。详见
+> 作为唯一附件——**这就是本仓库这份 GPL-3.0 源码的构建产物**。详见
 > [发一个 Release](#发一个-release)。
 > 想要闭源商业版（带账号、云同步、联网功能）去官网；官网那个包**不是**本仓库这份代码的
 > 构建产物，别把它当成 GPL 版本再分发。
@@ -266,7 +266,9 @@ git push origin main
    提交上**（`--target`），发布说明自动取 `CHANGELOG.md` 里 `## [版本号]` 那一节
    （**抽不到就失败**，不会留下空 Release）。
 
-附件是 `CS2Customizer-Setup-<版本>.exe` 和 `CS2Customizer-Setup-<版本>.exe.sha256`。
+Release 里的**附件只有一个文件**：`CS2Customizer-Setup-<版本>.exe`。校验和不是没有，
+而是写进发布说明正文（不是第二个附件）——只下 exe 的人不会漏掉它，下载页面上也不会
+多出一个没人点的文件。
 
 几个刻意的设计，别绕过去：
 

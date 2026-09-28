@@ -37,7 +37,7 @@ It never touches the game process.
 > **This repository does publish Release binaries.** Bump the version in `config.py` and
 > push to `main`: [`.github/workflows/release.yml`](.github/workflows/release.yml) then runs the
 > full CI gate, builds on Windows, creates the Release and tags it, with
-> `CS2Customizer-Setup-<version>.exe` and its `.sha256` attached — that binary **is a build of
+> `CS2Customizer-Setup-<version>.exe` as the only asset — that binary **is a build of
 > this repository's GPL-3.0 source**. See
 > [Publishing a Release](#publishing-a-release). The download on the
 > website is the closed-source commercial build and is **not** a build of this repository's code —
@@ -282,7 +282,9 @@ four stages:
    the `## [version]` section of `CHANGELOG.md` (**it fails loudly if that section is missing**,
    so an empty Release can never be published).
 
-Attached: `CS2Customizer-Setup-<version>.exe` and `CS2Customizer-Setup-<version>.exe.sha256`.
+The Release carries **exactly one asset**: `CS2Customizer-Setup-<version>.exe`. The checksum is not
+dropped, it moved into the release notes body rather than becoming a second file — someone who
+downloads only the exe still sees it, and the download list stays free of a file nobody clicks.
 
 Deliberate design choices — do not route around them:
 

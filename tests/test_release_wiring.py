@@ -157,6 +157,51 @@ def test_preflight_short_circuits_unreleased_pushes():
     )
 
 
+def test_release_gate_does_not_cancel_itself():
+    """发版这道门禁不能和独立那条 ci 落进同一个 concurrency group。
+
+    **这是判据记下的一次真实事故**，不是假想：首次运行（2026-09-28，run 36401751401）
+    的现象是 preflight 成功、这个作业**连作业记录都没产生**、build / publish 变成 skipped、
+    整条 run 记 failure。actionlint 对三份 workflow 都报合法，所以不是语法问题。
+
+    成因：`ci.yml` 自带
+    `concurrency: {group: ${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true}`，
+    而**被调用的** workflow 里 `github.workflow` 是谁的名字不由我们决定。取到被调方 `ci`
+    时，这个调用作业和同一次 push 上独立跑的那条 ci.yml 落进同一个 group，
+    `cancel-in-progress: true` 于是把发版门禁自己取消了——两条流水线同一秒启动，窗口正好对上。
+
+    真正的不变量不是「group 名字不一样」（那只是这次的症状），而是：
+    **发版门禁的 group 不能依赖 `github.workflow`**。那个值在可复用调用里不是我们能控制的。
+    """
+    gate = _load(RELEASE)["jobs"]["ci"]
+    conc = gate.get("concurrency") or {}
+    group = str(conc.get("group", ""))
+    assert group, (
+        "release.yml 调 ci.yml 的那个作业没有 concurrency —— "
+        "它会继承 ci.yml 自己的 group，而那个 group 由 github.workflow 决定"
+    )
+    assert "github.workflow" not in group, (
+        f"发版门禁的 concurrency group 是 {group!r}，里面用了 github.workflow。"
+        "在可复用调用里那个值不是我们能控制的，会和独立那条 ci 撞进同一个 group "
+        "然后互相取消（事故 run 36401751401）。"
+    )
+    assert conc.get("cancel-in-progress") is False, (
+        "发版门禁不该 cancel-in-progress：取消到一半会留下有 Release 没附件的状态。"
+    )
+
+
+def test_release_contains_only_the_installer():
+    """Release 里只挂一个 exe；校验和进说明正文，不做第二个附件。"""
+    run = _run_text(_load(RELEASE)["jobs"]["publish"])
+    create = run.split("gh release create", 1)[1].split('echo "----"', 1)[0]
+    assert "dist/*.exe" in create, "发版命令没有把安装包 exe 作为附件传进去"
+    assert ".sha256" not in create, (
+        "发版命令还挂着 .sha256 附件。校验和应该写进说明正文（只下 exe 的人也会看到），"
+        "而不是在下载页上多出一个没人点的文件。"
+    )
+    assert "cat dist/*.sha256" in run, "校验和没有被写进发布说明"
+
+
 def test_publish_gates_on_ci_and_build():
     """`publish` 必须等打包，且经由 build 传递地等到 ci。"""
     jobs = _load(RELEASE)["jobs"]
