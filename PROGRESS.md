@@ -6,7 +6,16 @@
 > planned, what was tried and rejected, and which claims in the code and in older documents are already
 > known to be wrong. Read it, then verify the specific claim you are about to rely on, in source.
 >
-> **Latest state (2026-09-28, ninth pass):** Broken Release **v2.3.1 was deleted** (release + remote
+> **Latest state (2026-09-28, tenth pass):** The first v2.3.1 attempt after deleting the broken
+> Release failed at the **new bundle check**, on its very first run — and not because of the bundle:
+> `check_frozen_bundle.py` died with `UnicodeEncodeError: 'charmap' codec can't encode characters`
+> printing its own first Chinese line. The runner's console is cp1252. It performed **zero**
+> comparisons and exited 1, which on a report is indistinguishable from passing. That is the same trap
+> as D7 (release notes, pinned `PYTHONIOENCODING`), which I had written a comment about and then
+> did not apply to a new script. Fixed inside the script (both streams reconfigured to UTF-8) rather
+> than via the workflow env, so correctness does not depend on the next person copying a line, plus a
+> regression test that runs the script under a forced cp1252 (entry 12). The bundle itself remains
+> unverified. Earlier in this pass: Broken Release **v2.3.1 was deleted** (release + remote
 > tag, owner-approved) and the dependency hole is closed: `requirements.txt` added,
 > `requirements-ci.txt` references it instead of duplicating it, packaging installs it. On top of
 > that there is now a check that inspects the **built artifact** — `check_frozen_bundle.py` lists
@@ -153,6 +162,7 @@ Mark items the owner delegated to the agent as _(delegated)_.
 | **D12** | Release notes and the tag name take their version from `needs.preflight.outputs.version`, never from `GITHUB_REF_NAME`. | At publish time the tag does not exist yet, so there is no ref name to derive a version from. |
 | **D14** | The `ci` gate job carries its own `concurrency`: group `release-gate-${{ github.ref }}`, `cancel-in-progress: false`, and **no `github.workflow` in the group**. | Fixes the self-cancelling gate of entry 4. The invariant is "the gate's group must not depend on `github.workflow`", because in a reusable call that value is not ours to control. |
 | **D17** | **Supersedes D14.** The real fix is in **`ci.yml`**: its `concurrency.group` now uses `${{ github.workflow_ref }}-${{ github.ref }}` (the *caller's* workflow path) instead of `${{ github.workflow }}-${{ github.ref }}`. The caller-side `concurrency` from D14 is **removed** — two mechanisms overlap, and D14 demonstrably did not work. | D14 was tried and disproved by run 36402772836, which failed identically with D14 in place. Invariant, now guarded by a test: a workflow that gets reused must not key its concurrency group on `github.workflow`. |
+| **D27** | Scripts that print non-ASCII to stdout **reconfigure their own streams to UTF-8** rather than relying on the workflow setting `PYTHONIOENCODING`. | A runner's console encoding is not the script's to control, and D7's lesson is that the env var is one forgotten copy away from a silent zero-work failure. The `build-installer.yml` note stays too, for the shell steps. |
 | **D26** | The packaging job runs `build_tools/check_frozen_bundle.py` **before** compiling the installer: it lists the built exe's embedded archive via PyInstaller's `archive_viewer -r -b` and requires every module from the shared import scan to be present, in the exe **or** in the sibling `_internal/`. | A dependency relationship has two ends and the CI suite can only see one. Deciding **against** a "did the exe stay alive for 20 seconds" smoke test: an unhandled exception on Windows opens a modal crash dialog, the process then hangs waiting for a click, so "did not exit" is exactly what a crash looks like — the check would pass the defect it was built for. The archive listing was validated against a real one-file build before being relied on. |
 | **D24** | The core runtime dependencies live in a new **`requirements.txt`**, which `requirements_qt.txt` already referred to; `requirements-ci.txt` references it instead of listing those packages a second time; the packaging job installs it. | The first published Release (v2.3.1) could not start: `No module named 'flask'`. The dependency was not missing from the *code*, it was missing from the *packaging input* — and CI stayed green precisely because the list had been copied in two places. |
 | **D25** | A test walks the app's **module-level, unguarded** imports and requires every one to be declared in `requirements_qt.txt` + `requirements.txt`, and requires the packaging job to install that set. | The gap that shipped a broken binary. Deliberately scoped to module-level unguarded imports: a function-body import is lazy (this app lazy-loads pages), and a `try/except`-guarded import is an intentional optional dependency — declaring those would change product behaviour by enabling fallback paths the author left disabled. Recorded limitation: guarding a hard import turns this test green while only converting a crash into a silent degradation. |
@@ -698,6 +708,49 @@ product build are unproven until the next run.
 
 **Supersedes.** Nothing.
 
+### 🟡 Entry 12: The new bundle check died printing its own message (2026-09-28)
+
+**What / why.** Run 36418436440 got past `pip install` and past the onedir build, then failed at
+step 7 — `核对产物里真的冻进了启动必需的模块`, the check added in entry 11, on its first ever
+execution. The log's only signal was:
+
+    Traceback (most recent call last):
+    UnicodeEncodeError: 'charmap' codec can't encode characters in position 7-10
+
+GitHub's Windows runners have a cp1252 console. The script's first line is Chinese, so it crashed
+printing it, performed **zero** bundle comparisons, and exited 1 — and an exit-1 with no output is
+indistinguishable, on a report, from a check that passed.
+
+**This is the second time this project has hit that exact trap.** The first was D7, the release-notes
+extraction, and I wrote a comment there explaining it in detail. Then I wrote a new script that prints
+Chinese and did not look. ⭐ **它不会提醒你**：a script does not know a sibling script was bitten.
+
+**Changed.** `build_tools/check_frozen_bundle.py` reconfigures **both** streams to UTF-8 at import,
+before any output. Deliberately *not* `PYTHONIOENCODING` on the workflow step: correctness should not
+depend on the next person copying a line into a new script (the `build-installer.yml` note stays, for
+the shell steps, which are not Python).
+`tests/test_runtime_dependency_coverage.py` gains
+`test_bundle_check_can_print_on_a_cp1252_console`, which runs the script in a child process under a
+forced `PYTHONIOENCODING=cp1252` and asserts both that no `UnicodeEncodeError` appears and that the
+Chinese INFO line actually reached stdout.
+
+**Decision(s).** D27.
+
+**Verified.** 9 passed; ruff clean. Removing the reconfigure turns the new test red; restoring turns it
+green.
+⚠ **And the first version of that test was measuring the wrong stream**, which is why it passed with
+the fix deleted. It drove the script down its *failure* branch, and that branch writes to **stderr** —
+measured on this machine, `PYTHONIOENCODING=cp1252` breaks **stdout** while stderr stays UTF-8. So the
+test asserted on the one stream that never would have failed. It now points at the success branch's
+first line, which is the stdout write the runner actually died on. ⚠⭐ Same family as the dead ordering
+assertion in entry 11: a judge aimed at the wrong thing looks exactly like a judge that works.
+**Not verified:** the bundle check itself. Two runs in a row have now been lost to the check's own
+plumbing before it ever reported on a product.
+
+**Not done / open.** `PROGRESS.md` is past 800 lines and needs compaction.
+
+**Supersedes.** Nothing.
+
 ---
 
 ## 4. Known drift and superseded claims
@@ -740,6 +793,7 @@ remembered from a superseded source is unverified until re-checked.
 | Changelog extraction | Local run of the embedded python for `2.3.1` and `9.9.9` | found / exit 1 | 2026-09-28 |
 | Mutation checks on `release.yml` | drop `build`/`ci` `if:` · `--target` -> `main` · always-release · drop `gh release view` | each red; restore green | 2026-09-28 |
 | Full test matrix | `python build_tools/run_tests.py` | **not run** — needs pytest on the project interpreter | — |
+| Bundle check | run 36418436440, step 7 | **failed on its own printing** (`UnicodeEncodeError`, cp1252); zero comparisons performed. Fixed by D27, not yet re-run | 2026-09-28 |
 | **Published Release** | launch the v2.3.1 exe | **`No module named 'flask'` — the artifact did not run.** Release + tag deleted (owner-approved); fix D24/D25/D26 in, not yet re-run | 2026-09-28 |
 | Real release run | run 36415053429 | **success** — Release v2.3.1 created with the installer attached | 2026-09-28 |
 | Earlier release runs | `gh run view 36401751401`, `36402772836` | **failed twice**, identically: preflight ok, `ci` job never created, build/publish skipped, no Release. D14 did not fix it | 2026-09-28 |

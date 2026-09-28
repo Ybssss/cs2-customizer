@@ -37,6 +37,22 @@ import subprocess
 import sys
 from pathlib import Path
 
+# ⚠ 必须在**任何输出之前**把 stdout 切到 UTF-8。GitHub 的 windows runner 控制台代码页是
+# cp1252，而本脚本的报错正文是中文：2026-09-28 的 run 36418436440 就是死在
+#   UnicodeEncodeError: 'charmap' codec can't encode characters in position 7-10
+# 也就是**打自己的第一行日志就炸了**，一次比较都没做——而报告上只留下一个退出码 1，
+# 与"检查通过"长得一模一样。
+# ⭐ 这和 release.yml 里给发布说明钉 PYTHONIOENCODING 是同一个坑（D7），那次我写了注释
+#   记下来，这次新写脚本时没往自己身上想。教训：**写一个新的、要打中文的脚本时，
+#   先看同类脚本有没有处理过编码**——它不会提醒你。
+# ⚠ 放在脚本里而不是只靠 workflow 的 env：那台机器的 locale 不是这个脚本能管的，
+#   靠调用方记得设环境变量，等于把正确性押在"下一个人记得复制那一行"上。
+for _stream in (sys.stdout, sys.stderr):
+    try:                                   # pragma: no branch - 三个平台都有
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):   # pragma: no cover - 被重定向到非文本流时
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from import_scan import third_party_imports  # noqa: E402  (路径原因)
 

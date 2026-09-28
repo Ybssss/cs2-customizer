@@ -193,6 +193,42 @@ def test_bundle_check_refuses_to_pick_between_several_builds(tmp_path):
         bundle.find_exe(tmp_path)
 
 
+def test_bundle_check_can_print_on_a_cp1252_console(tmp_path):
+    """核对脚本在 cp1252 控制台上必须能**打印**,而不是死在打印上。
+
+    **判据记下的是一次真实运行**（run 36418436440，第 7 步）：脚本在打第一行中文日志时
+    就 `UnicodeEncodeError` 退出了，一次比较都没做——而报告上只是一个退出码 1，
+    和"检查通过"在报告上**一模一样**。
+
+    ⭐ 这是本项目里第二次栽在同一个坑（第一次是 release.yml 的发布说明，见 D7），
+    而第一次已经把原因写在注释里了。写新脚本时没去看同类脚本怎么处理——**它不会提醒你**。
+
+    ⚠⚠ 这条判据第一版量错了流：它只让脚本走**失败分支**，而那条分支写的是 stderr。
+    实测在 Windows 上 `PYTHONIOENCODING=cp1252` 会让 **stdout** 炸掉，而 stderr 仍是
+    UTF-8——所以第一版在删掉修复之后**照样全绿**。现在这条盯的是 runner 上真正炸掉的那条
+    路径：脚本成功分支的第一行 `[INFO] 核对产物: …`，走 stdout。
+    """
+    import os
+
+    dummy = tmp_path / "CS2 Customizer.exe"
+    dummy.write_bytes(b"not really an archive")
+    env = dict(os.environ, PYTHONIOENCODING="cp1252", PYTHONUTF8="0")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "build_tools" / "check_frozen_bundle.py"), str(dummy)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, check=False,
+    )
+    output = result.stdout + result.stderr
+    assert "UnicodeEncodeError" not in output, (
+        "核对脚本在 cp1252 控制台上死于打印自己的中文日志——"
+        f"它因此一次比较都没做，却只留下一个退出码 {result.returncode}，"
+        "和检查通过在报告上无法区分。stdout 是真正炸掉的那条流，别只测 stderr。"
+    )
+    assert "核对产物" in result.stdout, (
+        f"脚本连第一行中文 INFO 都没打出来，stdout:\n{result.stdout[:400]}"
+    )
+
+
 def test_runtime_dependencies_are_declared_in_exactly_one_place():
     """运行时依赖只留一份清单，不许在 requirements-ci.txt 里再抄一遍。
 
