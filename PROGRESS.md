@@ -6,7 +6,19 @@
 > planned, what was tried and rejected, and which claims in the code and in older documents are already
 > known to be wrong. Read it, then verify the specific claim you are about to rely on, in source.
 >
-> **Latest state (2026-09-28, eleventh pass):** The check now runs, prints, and gets to the actual
+> **Latest state (2026-09-28, twelfth pass):** The packaging job got past the bundle check's own
+> bugs and failed one step earlier, at `pip install`. The log said
+> `ResolutionImpossible` + "no matching distributions available for your environment: click", with a
+> wall of `flask 3.0.0…3.1.3 depends on click>=8.1.3` above it — which reads exactly like a version
+> conflict. **It is not one.** Reproduced locally: pip had `ReadTimeoutError` fetching
+> `/simple/click/` from PyPI, retried three times, gave up, and reported a network problem as an
+> unsatisfiable environment. Fixed with `--retries 10 --timeout 120` (D28).
+> Second finding, reproduced on the owner's own machine: pip decodes a requirements file with the
+> **machine's locale codec**, and this box is cp936 (GBK) — so the Chinese comments in the three
+> requirement files made `pip install` raise `UnicodeDecodeError: 'gbk' codec can't decode byte 0x80`
+> **before resolving anything**. All three files now carry ASCII comments with every spec preserved,
+> and the documented first line of both READMEs works on a Chinese Windows box (entry 14). Earlier in
+> this pass: The check now runs, prints, and gets to the actual
 > work — and fails on **its own half-applied refactor**: `main()` resolved the exe, validated it,
 > printed it, and then handed `args.exe` (which is `None` when the workflow calls it with no
 > argument) to `archive_viewer`, producing `Archive None does not exist!` (run 36422318501, step 7).
@@ -169,6 +181,8 @@ Mark items the owner delegated to the agent as _(delegated)_.
 | **D12** | Release notes and the tag name take their version from `needs.preflight.outputs.version`, never from `GITHUB_REF_NAME`. | At publish time the tag does not exist yet, so there is no ref name to derive a version from. |
 | **D14** | The `ci` gate job carries its own `concurrency`: group `release-gate-${{ github.ref }}`, `cancel-in-progress: false`, and **no `github.workflow` in the group**. | Fixes the self-cancelling gate of entry 4. The invariant is "the gate's group must not depend on `github.workflow`", because in a reusable call that value is not ours to control. |
 | **D17** | **Supersedes D14.** The real fix is in **`ci.yml`**: its `concurrency.group` now uses `${{ github.workflow_ref }}-${{ github.ref }}` (the *caller's* workflow path) instead of `${{ github.workflow }}-${{ github.ref }}`. The caller-side `concurrency` from D14 is **removed** — two mechanisms overlap, and D14 demonstrably did not work. | D14 was tried and disproved by run 36402772836, which failed identically with D14 in place. Invariant, now guarded by a test: a workflow that gets reused must not key its concurrency group on `github.workflow`. |
+| **D28** | The packaging `pip install` runs with `--retries 10 --timeout 120`, and the reason is written in the workflow. | A single PyPI read timeout on `/simple/click/` was reported by pip as `ResolutionImpossible` / "no matching distributions available for your environment", under a list of `flask … depends on click>=8.1.3` that reads like a version conflict. Editing version bounds fixes nothing. |
+| **D29** | All three requirements files carry **ASCII-only comments**; every package and version bound is byte-identical to before. The narrative stays in `PROGRESS.md`. | pip decodes requirements files with the machine's locale codec, not UTF-8. On the owner's own Chinese Windows box (cp936) `pip install -r requirements_qt.txt` raised `UnicodeDecodeError` before resolving anything — and that file is the first line of both READMEs' install instructions. A requirements file is read by a machine; it is not a place for prose in a specific language. |
 | **D27** | Scripts that print non-ASCII to stdout **reconfigure their own streams to UTF-8** rather than relying on the workflow setting `PYTHONIOENCODING`. | A runner's console encoding is not the script's to control, and D7's lesson is that the env var is one forgotten copy away from a silent zero-work failure. The `build-installer.yml` note stays too, for the shell steps. |
 | **D26** | The packaging job runs `build_tools/check_frozen_bundle.py` **before** compiling the installer: it lists the built exe's embedded archive via PyInstaller's `archive_viewer -r -b` and requires every module from the shared import scan to be present, in the exe **or** in the sibling `_internal/`. | A dependency relationship has two ends and the CI suite can only see one. Deciding **against** a "did the exe stay alive for 20 seconds" smoke test: an unhandled exception on Windows opens a modal crash dialog, the process then hangs waiting for a click, so "did not exit" is exactly what a crash looks like — the check would pass the defect it was built for. The archive listing was validated against a real one-file build before being relied on. |
 | **D24** | The core runtime dependencies live in a new **`requirements.txt`**, which `requirements_qt.txt` already referred to; `requirements-ci.txt` references it instead of listing those packages a second time; the packaging job installs it. | The first published Release (v2.3.1) could not start: `No module named 'flask'`. The dependency was not missing from the *code*, it was missing from the *packaging input* — and CI stayed green precisely because the list had been copied in two places. |
@@ -798,6 +812,60 @@ to the check's own code before it reported anything about the artifact.
 
 **Supersedes.** Nothing.
 
+### 🟡 Entry 14: A network timeout wearing a dependency conflict's clothes (2026-09-28)
+
+**What / why.** Run 36423164375 failed at step 5, `安装依赖` — earlier than the bundle check, so the
+check is still unverified on a real product. The log:
+
+    WARNING: Retrying … ReadTimeoutError … : /simple/click/
+    ERROR: Cannot install -r requirements.txt (line 25) because …
+    ERROR: ResolutionImpossible
+    The conflict is caused by:
+    flask 3.1.3 depends on click>=8.1.3
+    … (every flask version listed)
+    Additionally, some packages in these conflicts have no matching
+    distributions available for your environment:
+    click
+
+**It is not a conflict.** Reproduced locally with the same specifier set: pip timed out fetching
+`/simple/click/` from PyPI, retried three times, gave up, and phrased a network failure as
+"this environment cannot install click". The `flask … depends on click>=8.1.3` wall is pip's
+backtracking trace, not a constraint anyone wrote. Anyone reading only the log would "fix" the
+version bounds and change nothing.
+
+**Second defect, found by reproducing it: the requirement files were unreadable on this machine.**
+`pip install --dry-run` here failed *before resolving*, with
+`UnicodeDecodeError: 'gbk' codec can't decode byte 0x80`. pip decodes a requirements file with the
+**machine's locale codec**, and this box is `cp936` — GBK. The three requirement files carried Chinese
+comments as UTF-8, which is not always decodable as GBK. The owner uses Chinese Windows, and
+`requirements_qt.txt` is the first line of the install instructions in **both** READMEs, so the
+documented install path failed on the audience's own platform.
+
+**Changed.**
+- `.github/workflows/build-installer.yml` — `pip install --retries 10 --timeout 120 …`, with the
+  misleading-error story written next to it.
+- `requirements_qt.txt`, `requirements.txt`, `requirements-ci.txt` — comments in **ASCII**, every
+  package and version bound preserved. The narrative (why the file exists, what it prevents) went to
+  `PROGRESS.md` and stays in the file as a short ASCII pointer.
+- `tests/test_runtime_dependency_coverage.py` 11 → 13 cases: the ASCII invariant over all three files,
+  and the retry flag on the install.
+
+**Decision(s).** D28, D29.
+
+**Verified.** 13 passed in the file, 22 with `test_version_consistency`; ruff clean; `actionlint` clean.
+Five mutations go red: put Chinese back into each of the three files, drop `--retries`, drop
+`-r requirements.txt`. Proven end to end on this GBK machine: `pip install --dry-run -r
+requirements_qt.txt -r requirements.txt -r requirements-build.txt pytest` now resolves
+(`Would install Flask-3.1.3 … click-8.5.0 …`), where before it died in the decoder.
+
+**Not verified:** the packaging run itself. A flaky index is now survivable; whether the runtime set
+*resolves on the runner's Python 3.13* is still not proven — it resolves on 3.11 here, and the runner
+is 3.13.
+
+**Not done / open.** `PROGRESS.md` is past 900 lines and needs compaction.
+
+**Supersedes.** Nothing.
+
 ---
 
 ## 4. Known drift and superseded claims
@@ -840,6 +908,7 @@ remembered from a superseded source is unverified until re-checked.
 | Changelog extraction | Local run of the embedded python for `2.3.1` and `9.9.9` | found / exit 1 | 2026-09-28 |
 | Mutation checks on `release.yml` | drop `build`/`ci` `if:` · `--target` -> `main` · always-release · drop `gh release view` | each red; restore green | 2026-09-28 |
 | Full test matrix | `python build_tools/run_tests.py` | **not run** — needs pytest on the project interpreter | — |
+| Install step | run 36423164375, step 5 | `ResolutionImpossible` on `click` — actually a PyPI read timeout (D28). Not yet re-run | 2026-09-28 |
 | Bundle check | run 36422318501, step 7 | printed fine, then `Archive None does not exist!` — the check fed `args.exe` (None) to the reader. Fixed, not yet re-run | 2026-09-28 |
 | Bundle check | run 36418436440, step 7 | **failed on its own printing** (`UnicodeEncodeError`, cp1252); zero comparisons performed. Fixed by D27, not yet re-run | 2026-09-28 |
 | **Published Release** | launch the v2.3.1 exe | **`No module named 'flask'` — the artifact did not run.** Release + tag deleted (owner-approved); fix D24/D25/D26 in, not yet re-run | 2026-09-28 |

@@ -77,7 +77,17 @@ jobs:
         # 双击即 `No module named 'flask'`(那个 Release 要不要撤回见 PROGRESS.md section 4)。
         # 同一次装依赖还漏过 pytest:build_release.py:951 默认把 tests/test_no_bundled_assets.py
         # 当作**打包前的门禁**跑,只有 --skip-tests 才跳过。
-        run: pip install -r requirements_qt.txt -r requirements.txt -r requirements-build.txt pytest
+        # ⚠ --retries/--timeout 不是可有可无的洁癖:实测 run 36423164375 第 5 步挂在
+        #   WARNING: Retrying ... ReadTimeoutError ... /simple/click/
+        #   ERROR: ResolutionImpossible ... "some packages have no matching
+        #   distributions available for your environment: click"
+        # 那**不是依赖冲突**,是一次索引读超时:pip 重试三次之后放弃了 click 的索引页,
+        # 然后把网络问题说成了"这个环境装不上"。日志里那串 flask 3.0.0…3.1.3 全都
+        # depends on click>=8.1.3 看着极像真冲突,极易把人引去改版本号——而改版本号
+        # 什么也修不了。给足重试与超时,它就只是一次抖动。
+        run: >-
+          pip install --retries 10 --timeout 120
+          -r requirements_qt.txt -r requirements.txt -r requirements-build.txt pytest
 
       - name: 构建 onedir 产物
         # --without-bundled-assets 是开源版构建的必需开关：构建链路默认断言

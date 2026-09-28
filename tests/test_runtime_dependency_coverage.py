@@ -77,6 +77,63 @@ def test_third_party_imports_match_declared_dependencies():
     )
 
 
+def _install_run() -> str:
+    """打包作业里那条 `pip install` 的**完整**命令（YAML 折行已合并）。
+
+    ⚠ 必须走 YAML 而不是逐行找：那条命令后来被折成
+    `run: >-` 加三行，`pip install --retries 10 --timeout 120` 与
+    `-r requirements.txt` **分属不同的行**。逐行断言"包含 requirements.txt 的那一行"
+    会在折行那一刻无声地变成查别的东西——和之前那几次"扫到了错的东西"同形。
+    """
+    import yaml
+
+    data = yaml.safe_load((ROOT / ".github" / "workflows" / "build-installer.yml").read_text(encoding="utf-8"))
+    steps = (data.get("jobs") or {}).get("build", {}).get("steps") or []
+    runs = [str(s.get("run", "")) for s in steps if "pip install" in str(s.get("run", ""))]
+    must_scan(runs, "build-installer.yml 里带 pip install 的步骤", least=1)
+    return " ".join(runs)
+
+
+def test_requirements_files_are_readable_by_pip_on_any_locale():
+    """依赖表必须是 **ASCII**：pip 用**机器的区域代码页**解码它，而不是 UTF-8。
+
+    **判据记下的是一次本地复现**：`requirements.txt` 最初带中文注释，在本机
+    （pip 23.2.1 + GBK）直接 `UnicodeDecodeError: 'gbk' codec can't decode byte 0x80`，
+    pip **连解析都没开始**。也就是说：一个以中文 Windows 为主力用户的项目，
+    自己新增的依赖表在主力用户的机器上装不了。
+    ⭐ 三份依赖表现在都判。`requirements_qt.txt` 是**两份 README 安装说明的第一行**，
+    在本项目主力的机器上（中文 Windows，GBK）它自己就 pip 装不了——实测本机
+    pip 23.2.1 读它就 UnicodeDecodeError，**解析根本没开始**。
+    它的内容一字未改，只把注释换成 ASCII：包与版本约束逐条照抄。
+    runner 上读得动是因为 cp1252 能解码任意字节——**能读不代表别人也读得动**。
+    """
+    for name in ("requirements.txt", "requirements-ci.txt", "requirements_qt.txt"):
+        raw = (ROOT / name).read_bytes()
+        offenders = [i for i, b in enumerate(raw) if b > 127]
+        assert not offenders, (
+            f"{name} 里有 {len(offenders)} 个非 ASCII 字节（第一个在偏移 {offenders[0]}）。"
+            "pip 用机器的区域代码页解码依赖表：在 GBK 机器上，UTF-8 的中文可能解不出来，"
+            "pip 会直接 UnicodeDecodeError，连解析都不开始。"
+            "⇒ 依赖表的注释写 ASCII，叙述留在 PROGRESS.md。"
+        )
+        raw.decode("ascii")          # 能解，就一定不会被区域代码页难住
+
+
+def test_packaging_install_retries_the_index():
+    """打包那一步的 pip 必须带重试与超时。
+
+    ⭐ 实测 run 36423164375：一次索引读超时（`/simple/click/`）被 pip 报成
+    `ResolutionImpossible` + "no matching distributions available for your environment"，
+    日志里那串 `flask 3.0.0…3.1.3 depends on click>=8.1.3` 看着像版本冲突，
+    **极易把人引去改版本号**——而改版本号什么也修不了。
+    """
+    run = _install_run()
+    assert "--retries" in run, (
+        f"打包那一步的 pip 没有重试：{run.strip()!r}。一次索引抖动就会让发版红，"
+        "而 pip 会把它报成依赖冲突（run 36423164375）。"
+    )
+
+
 def test_build_job_installs_the_runtime_dependency_set():
     """打包作业必须装**运行时**依赖，不只是 Qt 那一半。
 
@@ -84,12 +141,7 @@ def test_build_job_installs_the_runtime_dependency_set():
     两边都成立，产物里才可能有那个包——事故 v2.3.1 正是两边各自都对、而**中间那一步**
     只装了 requirements_qt.txt。
     """
-    run = "\n".join(
-        line for line in
-        (ROOT / ".github" / "workflows" / "build-installer.yml").read_text(encoding="utf-8").splitlines()
-        if "pip install" in line and not line.lstrip().startswith("#")
-    )
-    must_scan([run], "build-installer.yml 里的 pip install 行", least=1)
+    run = _install_run()
     assert "requirements.txt" in run, (
         f"打包作业的 pip install 是 {run.strip()!r}，没有装 requirements.txt。"
         "那份表才是运行时依赖（flask / pygame / 热键 / 音频 / pywin32），"

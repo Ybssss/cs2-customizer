@@ -1,31 +1,43 @@
-# CS2 Customizer 2.0 - Qt版本依赖
-# 现代化UI所需的额外依赖
-
-# Qt框架
+# CS2 Customizer - Qt-specific dependencies.
+# For the UI only; the core runtime dependencies live in requirements.txt.
+#
+# WHY THE COMMENTS HERE ARE ASCII
+#   pip decodes a requirements file with the MACHINE'S LOCALE CODEC, not UTF-8.
+#   On a Chinese Windows box that is GBK, and UTF-8 Chinese in these comments is
+#   not always decodable - pip 23.2.1 raised UnicodeDecodeError on this file
+#   before it even started resolving. Since this file is the FIRST line of the
+#   install instructions in both READMEs, on the platform this project targets,
+#   that made the documented install path fail outright. ASCII comments, no
+#   exceptions; the narrative lives in PROGRESS.md.
 PySide6>=6.6.0
 
-# v5 Phase 5: 矢量 icon 系统(Material Design Icons)
+# v5 Phase 5: vector icon system (Material Design Icons)
 qtawesome>=1.4.0
 
-# Windows 进程级音量 Ducking（枪声替换增强，可选）
+# Windows process-wide volume ducking, for the shot-replacement enhancement.
+# Optional: without it the app runs, the enhancement is just unavailable.
 pycaw; platform_system == "Windows"
 comtypes; platform_system == "Windows"
 
-# --- 2026-06-10 安全下限（pip-audit 体检后确定）---
-# pillow 12.1.x 含 6 个图片解析 CVE（本软件处理用户导入图片，属真实攻击面）
+# --- 2026-06-10 security floors, set after a pip-audit pass ---
+# pillow 12.1.x carries 6 image-parsing CVEs. This app parses user-imported
+# images, so that is a real attack surface, not a theoretical one.
 pillow>=12.2.0
-# requests/urllib3 升级修复已知 CVE（更新检测/账号登录链路使用）
+# requests/urllib3 raised to pick up fixes for known CVEs.
 requests>=2.33.0
 urllib3>=2.7.0
 
-# 注意：以下依赖已在 requirements.txt 中，这里仅列出Qt专用的
-# - customtkinter (经典版本需要)
-# - pygame (音频系统)
-# - flask (GSI服务器)
-# - 等等...
+# The packages below are NOT here on purpose - they are the core runtime set and
+# they live in requirements.txt, so there is exactly one copy of that list:
+#   pygame (audio), flask (the GSI receiver), pywin32 (autostart / volume),
+#   keyboard + pynput (global hotkeys), numpy, sounddevice, soundfile,
+#   pypinyin (pinyin in settings search), PyYAML.
+# Installing only this file does NOT give a working program.
 
-# --- 2026-08-14 死亡刷短视频 ---
-# 通过浏览器调试端点注入 JS，把抖音从"精选网格页"切到"推荐视频流"。
-# 抖音登录后会固定重定向到精选页，URL 参数覆盖不掉、合成鼠标消息也点不动，
-# 这是唯一可行的方式。缺这个库只会退化成停在精选页，不影响其他功能。
+# --- 2026-08-14: doomscrolling TikTok ---
+# Injects JS through a browser debug endpoint to switch Douyin from the
+# "curated grid" page to the recommendation feed. Douyin redirects back to the
+# curated page after login, URL parameters cannot override it and synthesised
+# mouse events do not reach it, so this is the only way that works. Without the
+# library the app merely stops on the curated page; nothing else breaks.
 websocket-client>=1.9.0

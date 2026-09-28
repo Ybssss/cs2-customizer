@@ -1,13 +1,23 @@
-# CI 专用依赖(GitHub Actions windows-latest)。
-# 口径:tests/ 全量回归所需的最小集 = 运行时依赖 + pytest。
+# CI-only dependency (GitHub Actions windows-latest).
+# What CI needs = the runtime dependencies + the test runner.
 #
-# ⚠ 下面这些包以前在这里**又抄了一遍**(flask / pygame / keyboard / pynput / pywin32 /
-#   pypinyin / numpy / sounddevice / soundfile / PyYAML),而打包流水线装的是另一份,
-#   于是"CI 绿、打包出来的 exe 缺 flask"—— 同一份依赖写两遍,必然有一处会腐烂。
-#   现在运行时依赖只在 requirements.txt 里存在一份,这里引用它。
-#   教训与 PyYAML 那条同源:"本地全绿"不等于"依赖声明完整",只有干净环境能证明。
+# WHY THE RUNTIME PACKAGES ARE NOT REPEATED HERE
+#   This file used to list every runtime package a second time (flask / pygame /
+#   keyboard / pynput / pywin32 / pypinyin / numpy / sounddevice / soundfile /
+#   PyYAML) so that CI would install them. That is how "CI installs it, packaging
+#   does not" happened: CI stayed green while the shipped artifact was missing
+#   flask and would not start (Release v2.3.1). Two copies of one list is two
+#   places to rot, and they rot in opposite directions.
+#   The runtime list now lives in requirements.txt only.
+#
+# WHY THE COMMENTS HERE ARE ASCII
+#   pip decodes a requirements file with the MACHINE'S LOCALE CODEC. On a Chinese
+#   Windows box that is GBK, and UTF-8 Chinese in the comments is not always
+#   decodable - pip raises UnicodeDecodeError before it even starts resolving.
+#   A requirements file is read by pip on arbitrary machines, so keep it ASCII.
 -r requirements_qt.txt
 -r requirements.txt
 
-# 测试驱动(build_tools/run_tests.py 逐文件子进程隔离;build_release.py 打包前也跑一条)
+# Test runner. Also used by the packaging build: build_release.py runs
+# tests/test_no_bundled_assets.py as a pre-build gate unless --skip-tests.
 pytest>=8.0
