@@ -283,14 +283,41 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run(cmd: List[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    cmd: List[str],
+    cwd: Path | None = None,
+    check: bool = True,
+    capture: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """跑一条外部命令。
+
+    `capture=True` 会**抓取**子进程的 stdout/stderr 并在这里打印出来，**失败也照打**。
+    ⭐ 这条是给编译器准备的，理由是一次真实事故：2026-09-28 的 release run 36411234329
+    里 ISCC 返回退出码 2，而日志里除了 `returned non-zero exit status 2` **一个字都没有**
+    ——ISCC 自己说了什么被整段吞掉，于是只能靠猜。编译器的话是这条链路上唯一的诊断信息，
+    吞掉它等于把"读日志"这条路堵死。
+
+    ⚠ 反过来，**PyInstaller 那种要跑十几分钟的命令不要开 capture**：抓取意味着那十几分钟
+    日志全程沉默，构建卡住时连"它还活着吗"都看不出来。所以默认 `capture=False`，
+    只在真正需要留存编译器输出的一处显式打开。
+    """
     print(f"[CMD] {' '.join(cmd)}")
-    return subprocess.run(
+    result = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
-        check=check,
+        check=False,
         text=True,
+        capture_output=capture,
     )
+    if capture:
+        for name, stream in (("stdout", result.stdout), ("stderr", result.stderr)):
+            if stream and stream.strip():
+                print(f"--- {name} ---\n{stream.rstrip()}")
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, output=result.stdout, stderr=result.stderr
+        )
+    return result
 
 
 def parse_pyinstaller_version(version: str) -> tuple[int, int, int]:
@@ -901,7 +928,9 @@ def build_installer(project_root: Path, version: str, app_name: str) -> Path:
         raise RuntimeError(missing_iscc_message())
     print(f"[INFO] ISCC detected: {iscc}")
 
-    run([iscc, str(iss_path), f"/DAppVersion={version}"], cwd=project_root)
+    # capture=True：ISCC 的诊断信息是这条链路上唯一能说清"为什么不编译"的来源，
+    # 吞掉它就只剩一个退出码（见 run() 的 docstring 里那次事故）。
+    run([iscc, str(iss_path), f"/DAppVersion={version}"], cwd=project_root, capture=True)
 
     installer = expected_installer_path(iss_path, version)
     if not installer.exists():

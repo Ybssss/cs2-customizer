@@ -1,4 +1,4 @@
-; CS2 Customizer Inno Setup 安装脚本(onedir 形态)
+﻿; CS2 Customizer Inno Setup 安装脚本(onedir 形态)
 ; 编译(推荐,版本号自动取自 config.VERSION、ISCC.exe 自动定位):
 ;     python build_tools\build_release.py --mode onedir --installer-only
 ; 前置: ① python build_tools\build_release.py --mode onedir
