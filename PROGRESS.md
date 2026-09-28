@@ -6,14 +6,14 @@
 > planned, what was tried and rejected, and which claims in the code and in older documents are already
 > known to be wrong. Read it, then verify the specific claim you are about to rely on, in source.
 >
-> **Latest state (2026-09-28, fourth pass):** The concurrency fix (D17) is **confirmed on a runner** —
-> run 36403249454 got past the gate and reached packaging. It then failed one step later, on a
-> **pre-existing** defect in `build-installer.yml`: `build_release.py` runs
-> `tests/test_no_bundled_assets.py` as a pre-build gate (line 951) but the packaging workflow never
-> installed pytest, so it died on `No module named pytest` (entry 6). Fixed by installing pytest in
-> that job and guarded by a test. **Still no Release exists.** The first two failures were self-inflicted
-> and are recorded as superseded; this third one was already broken in the upstream workflow, so it would
-> have hit any release attempt. Earlier in this pass:
+> **Latest state (2026-09-28, fifth pass):** PyInstaller now succeeds on the runner; the pipeline fails
+> one step later, again on a **pre-existing** `build-installer.yml` defect. Run 36406788535 got the gate
+> green (`ci / test` and `ci / ui-audit` both passed), built the onedir tree, found Inno Setup already
+> installed, and then the hand-rolled `iscc` call died on `You may not specify more than one script
+> filename` (entry 7) — `shell: bash` is git-bash, `$(python -c ...)` carries a Windows ``, and MSYS
+> argument conversion mangles `/DAppVersion=<值>`. Fixed by compiling through the project's own hardened
+> path, `build_release.py --mode onedir --installer-only`. **Still no Release exists**, and SHA256 /
+> upload / `gh release create --target` remain unproven. Earlier in this pass:
 > `ci.yml` groups its runs with `${{ github.workflow }}-${{ github.ref }}`, and in a **called** reusable
 > workflow `github.workflow` resolves to the **callee's** name (`ci`) — so the release's gate and the
 > standalone `ci` run for the same push shared one group and `cancel-in-progress: true` made them kill
@@ -111,6 +111,7 @@ Mark items the owner delegated to the agent as _(delegated)_.
 | **D12** | Release notes and the tag name take their version from `needs.preflight.outputs.version`, never from `GITHUB_REF_NAME`. | At publish time the tag does not exist yet, so there is no ref name to derive a version from. |
 | **D14** | The `ci` gate job carries its own `concurrency`: group `release-gate-${{ github.ref }}`, `cancel-in-progress: false`, and **no `github.workflow` in the group**. | Fixes the self-cancelling gate of entry 4. The invariant is "the gate's group must not depend on `github.workflow`", because in a reusable call that value is not ours to control. |
 | **D17** | **Supersedes D14.** The real fix is in **`ci.yml`**: its `concurrency.group` now uses `${{ github.workflow_ref }}-${{ github.ref }}` (the *caller's* workflow path) instead of `${{ github.workflow }}-${{ github.ref }}`. The caller-side `concurrency` from D14 is **removed** — two mechanisms overlap, and D14 demonstrably did not work. | D14 was tried and disproved by run 36402772836, which failed identically with D14 in place. Invariant, now guarded by a test: a workflow that gets reused must not key its concurrency group on `github.workflow`. |
+| **D19** | The installer is compiled by `python build_tools/build_release.py --mode onedir --installer-only`, never by a hand-written `iscc` invocation in shell. | Run 36406788535: git-bash + `\r` from `$(python -c ...)` + MSYS argument conversion on `/DAppVersion=…` made ISCC read the define as a second script filename, and the error pointed nowhere near the cause. The project already owns a hardened path (version read from `config.VERSION`, `find_tool("iscc")` with a "searched these paths" error, `subprocess` with a list so no shell is involved). |
 | **D18** | The packaging job installs `pytest` alongside the build requirements, rather than adding it to `requirements-build.txt` or switching to `requirements-ci.txt`. | `build_release.py:951` runs a test as a pre-build gate, so the test runner is a **build** dependency. `requirements-build.txt` has an exact-content test (`PyInstaller>=6.21,<7` only) and `requirements-ci.txt` drags in flask / pygame / sounddevice / numpy / pywin32 — neither is the right place. |
 | **D15** | The Release carries **exactly one asset**, the installer `.exe`. The SHA256 moves into the release notes body. | Owner's decision (they asked for "only exe apk", then learned there is no APK). The checksum still ships, and a downloader of only the exe still sees it. |
 | **D16** | This project has **no Android build and no APK is planned**. | It is a Windows-only PyQt5 app: Windows Magnification API, GSI, cfg writes, pywin32 autostart. An APK is a separate port with its own toolchain, not a build flag. Owner informed 2026-09-28. |
@@ -367,6 +368,59 @@ believing any of it.
 **Supersedes.** Nothing; first record of this defect. Corrects the implicit assumption in entries 1,
 3, 4 and 5 that the packaging job worked — it was never actually executed to completion.
 
+### 🟡 Entry 7: The hand-rolled `iscc` call mangled its own arguments (2026-09-28)
+
+**What / why.** Run 36406788535 (head 81eb8bb) is the first run to get the gate green
+(`ci / test` and `ci / ui-audit` both success) and to build the onedir tree. It then failed at the
+installer compile step:
+
+    You may not specify more than one script filename.
+    Inno Setup 6 Command-Line Compiler
+
+Nothing about that message points at the real cause, which is two layers of escaping stacked:
+
+- the step used `shell: bash`, i.e. git-bash, on a Windows runner;
+- the version came from `ver=$(python -c "…")`, whose output keeps the Windows `\r`
+  (`$( )` strips the trailing newline, not the carriage return), so `/DAppVersion=$ver`
+  carried a stray `\r`;
+- and `/DAppVersion=<值>` is an argument that starts with a slash, which MSYS argument conversion
+  rewrites before the Windows binary ever sees it.
+
+ISCC consequently read the define as a second script filename. The step had been fine on a developer's
+machine and wrong on the runner — the classic shape of a shell-quoting bug.
+
+**Changed.** `.github/workflows/build-installer.yml` — the compile step is now
+`python build_tools/build_release.py --mode onedir --installer-only`, with the failure written next to
+it. That path already did all three things right: version read straight from `config.VERSION` and
+passed as `/DAppVersion` (the `.iss` has no fallback constant, so a missing define is a hard `#error`),
+`find_tool("iscc")` locating the compiler and naming every path it searched when it fails, and
+`subprocess.run` with a **list**, so no shell quoting or argument conversion is involved at all.
+`--mode onedir` is required alongside `--installer-only` because the installer's `[Files]` section only
+accepts the onedir layout.
+
+`tests/test_release_wiring.py` gained `test_installer_is_compiled_by_the_build_script_not_by_hand`
+(13 cases now): no step may contain a raw `iscc` call, the `--installer-only` step must exist, the
+`--mode onedir` flag must be **on that same command**, and `build_release.py` must still pass the
+version via `/DAppVersion`.
+
+**Decision(s).** D19.
+
+**Verified.** 13 passed; ruff clean; `actionlint` clean. Four mutations turn it file red and restoring
+turns it green: revert to a hand-rolled `iscc`, drop `--installer-only`, drop `--mode onedir`, and stop
+passing `/DAppVersion` from the script.
+⚠ **One of those four first reported a false pass.** Dropping `--mode onedir` stayed green because
+`--mode onedir` also appears in the *build onedir* step, and the assertion concatenated every step's
+script before searching. That is the same shape as an earlier miss in this file (a `gh release view`
+string that also appeared in a different job). Both are now fixed by matching **per step**
+(`_run_scripts`) rather than over the whole job. ⭐ **一个字符串出现过，不等于那件事发生在你以为它
+出现的地方。**
+**Not verified:** that the installer compiles. The next runner proof is the one that matters.
+
+**Not done / open.** SHA256, artifact upload and `gh release create --target` are still unproven —
+nothing has ever reached the publish job.
+
+**Supersedes.** Nothing; first record of this defect.
+
 ---
 
 ## 4. Known drift and superseded claims
@@ -381,6 +435,7 @@ remembered from a superseded source is unverified until re-checked.
 | `README.md` / `README.en.md` build section | "**不进 Release**" about `build-installer.yml` | Still true of that workflow alone; it is no longer true of the tag path as a whole. | Kept, re-scoped to "when run on its own". |
 | `build-installer.yml` header | "**它不发布 Release。**" / "本仓库不做二进制分发渠道" | The first half is still true of this file; the second is no longer true of the repository. | Header rewritten to state both halves. |
 | Entries 1 and 3 (2026-09-28) | "The job graph is ready; first proof is a tag push." | The first run cancelled its own CI gate (entry 4). Paper-correct, runtime-wrong. | Superseded by D14 and entry 4. |
+| Entries 1, 3, 4, 5 (2026-09-28) | Implicit: the packaging workflow's steps work as written. | Twice false in a row: the pytest gap (entry 6) and the hand-rolled `iscc` call (entry 7). Both pre-existing in `build-installer.yml`; neither had ever been executed on a runner. | Corrected by D18/D19. Treat "it works on my machine" as unproven for every step in this file. |
 | Entries 1, 3, 4, 5 (2026-09-28) | Implicit: the packaging job installs what the build script needs. | `build-installer.yml` never installed pytest, so `build_release.py`'s pre-build gate could not run. Packaging has never completed on a clean runner. | Corrected by D18 and entry 6. |
 | Entry 4 / D14 (2026-09-28) | "The caller-side `concurrency` on the `ci` gate job stops it cancelling itself." | Wrong. Run 36402772836 failed identically with D14 in place. The group that collides is inside the callee. | Superseded by D17 and entry 5. The failure it was written to fix was real; the fix was not. |
 | Decision D6 (2026-09-28, entry 1) | "Publication trigger is a `v*` tag push only. No manual-dispatch release path." | The pipeline now runs on `push` to `main` and creates the tag itself. | Superseded by D9; kept in the table as history, do not act on it. |
@@ -409,7 +464,9 @@ remembered from a superseded source is unverified until re-checked.
 | Full test matrix | `python build_tools/run_tests.py` | **not run** — needs pytest on the project interpreter | — |
 | Real release run | `gh run view 36401751401`, `36402772836` | **failed twice**, identically: preflight ok, `ci` job never created, build/publish skipped, no Release. D14 did not fix it | 2026-09-28 |
 | Real release run, after D17 | run 36403249454 (head 27b53ff) | gate **started** (`ci / test`, `ci / ui-audit`) with the standalone ci unaffected — D17 confirmed. Then packaging failed: `No module named pytest` | 2026-09-28 |
-| Packaging job | same run, job 108870195018 | failed at step 6 `No module named pytest`; steps 7-10 skipped. D18 not yet re-run | 2026-09-28 |
+| Packaging job | run 36403249454 job 108870195018 | failed at step 6 `No module named pytest`; steps 7-10 skipped. D18 fixed | 2026-09-28 |
+| Gate on a runner | run 36406788535 | `ci / test` and `ci / ui-audit` both success (16 min and 2.9 min) | 2026-09-28 |
+| Packaging job | run 36406788535 job 108881363747 | PyInstaller succeeded; Inno preinstalled (6.7.1); step 8 failed: `You may not specify more than one script filename`. D19 not yet re-run | 2026-09-28 |
 
 Isolated venv used for the runs above (created by the agent, outside the repo):
 `C:\Users\YB\AppData\Local\Temp\opencode\cs2venv` (Python 3.11 + `pytest`, `PyYAML`, `ruff`).

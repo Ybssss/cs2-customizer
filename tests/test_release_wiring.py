@@ -68,6 +68,25 @@ def _needs(job: dict) -> list[str]:
     return [needs] if isinstance(needs, str) else list(needs)
 
 
+def _run_scripts(job: dict) -> list[str]:
+    """一个作业里每一步的 `run:` 正文（各自去注释）。
+
+    ⚠ 需要**逐步**分开看时用它，而不是拼成一大段再 `in` 断言：`build-installer.yml` 里
+    `--mode onedir` 在"构建 onedir 产物"那一步也出现过，所以拼起来查
+    "`--installer-only` 那一步是否也带 `--mode onedir`"永远绿——**匹配到的是另一处**。
+    这和 `gh release view` 那次是同一个形状的错误。
+    """
+    out: list[str] = []
+    for step in job.get("steps") or []:
+        lines = [
+            line for line in str(step.get("run", "")).splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        if lines:
+            out.append("\n".join(lines))
+    return out
+
+
 def _run_text(job: dict) -> str:
     """一个作业里所有 `run:` 脚本拼起来的正文，**去掉整行注释**。
 
@@ -252,6 +271,53 @@ def test_packaging_workflow_installs_the_test_runner_the_build_script_calls():
             f"{req} 里现在已经有 pytest 了。打包流水线的 pip install 行还写着 pytest 的话，"
             "要么删掉多余的字样，要么改这条判据的说明 —— 别让它两处都留着。"
         )
+
+
+def test_installer_is_compiled_by_the_build_script_not_by_hand():
+    """安装包必须由 `build_release.py --installer-only` 编译，不许在 shell 里手搓 iscc。
+
+    **这也是一次真实失败**（release run 36406788535，作业 build 第 8 步）：
+
+        You may not specify more than one script filename.
+        Inno Setup 6 Command-Line Compiler
+
+    看着像脚本名写错了，其实是两层转义叠在一起：`shell: bash` 是 git-bash，
+    `$(python -c ...)` 的输出带着 Windows 的 `\r`，而 `/DAppVersion=<值>` 这种以斜杠
+    开头的参数还会被 MSYS 的参数转换搅一遍。ISCC 于是把第二个参数当成了第二个脚本名。
+    **报错完全指不到真正的原因**——而这正是"在 shell 里手搓编译器调用"的固有代价。
+
+    判据钉的是**归属**，不是具体写法：谁负责调编译器、怎么传版本号。仓库里已经有 hardened
+    的那条路（`build_release.py` 的 `build_installer()`：版本号从 `config.VERSION` 直读、
+    `find_tool("iscc")` 定位并给出"找过哪些路径"的报错、`subprocess` 用列表传参不经过
+    任何 shell）。判据同时要求那条路仍然把版本号经 `/DAppVersion` 传出去——如果哪天
+    改成在 iss 里写死版本号（正是 `test_installer_iss_declares_no_version_of_its_own`
+    正在防的事），本条要跟着改。
+    """
+    scripts = _run_scripts(_load(BUILD)["jobs"]["build"])
+    for script in scripts:
+        assert not re.search(r"^\s*iscc\s", script, re.M), (
+            "打包流水线里又出现了手写的 iscc 调用。"
+            "走 `python build_tools/build_release.py --mode onedir --installer-only`——"
+            "在 shell 里手搓编译器调用已经被 git-bash 的参数转换坑过一次"
+            "（run 36406788535，报错还完全指不到原因）。"
+        )
+
+    installer_steps = [s for s in scripts if "--installer-only" in s]
+    must_scan(installer_steps, "build-installer.yml 里带 --installer-only 的那一步", least=1)
+    for step in installer_steps:
+        # 逐步查，不是拼起来查：`--mode onedir` 在"构建 onedir 产物"那一步也有，
+        # 拼起来断言会匹配到那一处，于是这步缺了参数也照样绿。
+        assert "--mode onedir" in step, (
+            "--installer-only 必须和 --mode onedir 写在**同一条命令**里："
+            "安装包的 [Files] 段只吃 onedir 形态，缺了会在 build_release.py 里当场报错"
+        )
+
+    script = (ROOT / "build_tools" / "build_release.py").read_text(encoding="utf-8")
+    assert 'f"/DAppVersion={version}"' in script, (
+        "build_release.py 不再经 /DAppVersion 把版本号传给 ISCC 了。"
+        "installer.iss 已经去掉自带兜底常量（漏传会 #error），"
+        "这条路径要是也断了，构建就会在装的时候才炸。"
+    )
 
 
 def test_publish_gates_on_ci_and_build():

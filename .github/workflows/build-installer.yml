@@ -89,10 +89,18 @@ jobs:
         run: choco install innosetup --no-progress -y
 
       - name: 编译安装包
-        shell: bash
-        run: |
-          ver=$(python -c "import re,io;print(re.search(r'^VERSION\s*=\s*\"([^\"]+)\"',io.open('config.py',encoding='utf-8').read(),re.M).group(1))")
-          iscc "build_tools/installer.iss" "/DAppVersion=$ver"
+        # 用项目自己那条路径,别在 shell 里手搓 iscc 调用。
+        # 手搓那版在 runner 上死于 ISCC 的 "You may not specify more than one script filename"
+        # (实测 release run 36406788535,作业 build 第 8 步):`shell: bash` 是 git-bash,
+        # `$(python -c ...)` 的输出带着 Windows 的 \r,而 `/DAppVersion=<值>` 这种以斜杠
+        # 开头的参数还会被 MSYS 的参数转换搅一遍 —— 两者叠加,ISCC 把第二个参数当成了
+        # 第二个脚本名。**报错信息完全指不到真正的原因**,因为错的是两层的转义。
+        # `build_release.py --installer-only` 那条路把三件事都做对了:版本号从
+        # config.VERSION 直读经 /DAppVersion 传入(iss 里漏传会 #error 当场中止)、
+        # find_tool("iscc") 负责定位编译器并给出"找过哪些路径"的报错、
+        # subprocess 用**列表**传参,完全不经过任何 shell 的引号与参数改写。
+        # ⚠ --installer-only 必须配 --mode onedir:安装包的 [Files] 段只吃 onedir 形态。
+        run: python build_tools/build_release.py --mode onedir --installer-only
 
       - name: 算 SHA256
         shell: bash
