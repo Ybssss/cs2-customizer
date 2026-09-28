@@ -69,7 +69,15 @@ jobs:
           fi
 
       - name: 安装依赖
-        run: pip install -r requirements_qt.txt -r requirements-build.txt
+        # ⚠ pytest 在这里不是多余的:build_release.py 默认把"无内置素材"那条判据
+        # 当作**打包前的门禁**跑(build_tools/build_release.py:951,
+        # `python -m pytest -q tests/test_no_bundled_assets.py`),只有 --skip-tests 才跳过。
+        # 而 pytest 住在 requirements-ci.txt 里,不在 requirements_qt / requirements-build 里,
+        # 所以这条流水线以前装依赖时漏了它 —— 打包一定挂在
+        # "No module named pytest" 上(实测:release run 36403249454,作业 build 的第 6 步)。
+        # 为什么不直接 `-r requirements-ci.txt`:那份表还拖着 flask / pygame / sounddevice /
+        # numpy / pywin32 一整套**测试用**依赖,打包只需要 pytest 一个。
+        run: pip install -r requirements_qt.txt -r requirements-build.txt pytest
 
       - name: 构建 onedir 产物
         # --without-bundled-assets 是开源版构建的必需开关：构建链路默认断言

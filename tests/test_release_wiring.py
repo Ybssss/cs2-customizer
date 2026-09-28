@@ -215,6 +215,45 @@ def test_release_contains_only_the_installer():
     assert "cat dist/*.sha256" in run, "校验和没有被写进发布说明"
 
 
+def test_packaging_workflow_installs_the_test_runner_the_build_script_calls():
+    """打包脚本在打包前会跑 pytest，所以打包流水线必须把它装上。
+
+    **这也是一次真实失败**（release run 36403249454，作业 build 第 6 步）。`build_release.py`
+    把"无内置素材"那条判据当**打包前的门禁**跑（`build_tools/build_release.py:951`，
+    `run([args.python, "-m", "pytest", "-q", "tests/test_no_bundled_assets.py"])`，只有
+    `--skip-tests` 才跳过），而 pytest 住在 `requirements-ci.txt` 里，不在
+    `requirements_qt.txt` / `requirements-build.txt` 里 —— 于是打包必然挂在
+    `No module named pytest` 上。
+
+    ⭐ 这条判据防的正是"两个依赖表各自成立、合起来少一个"这种形状：两份 requirements
+    都能装上、构建脚本自己也能跑，只有**打包这个动作**才暴露。而且它失败的位置离原因很远
+    （报错在 `subprocess.CalledProcessError` 里，真正的信息在上一行的 stderr）。
+    """
+    build_script = (ROOT / "build_tools" / "build_release.py").read_text(encoding="utf-8")
+    assert '"-m", "pytest"' in build_script, (
+        "build_release.py 里那条打包前门禁不见了 —— 如果它改成不跑测试了，"
+        "本条判据的依据就不在了，请连带改这条测试，别留着一条永远绿的。"
+    )
+
+    run = _run_text(_load(BUILD)["jobs"]["build"])
+    install_lines = [line for line in run.splitlines() if "pip install" in line]
+    must_scan(install_lines, "build-installer.yml 里的 pip install 行", least=1)
+    assert any("pytest" in line for line in install_lines), (
+        f"打包流水线装依赖时没有 pytest：{install_lines}。"
+        "而 build_release.py 默认会在打包前跑 tests/test_no_bundled_assets.py，"
+        "没有它就是 `No module named pytest`（实测 run 36403249454）。"
+    )
+
+    # 顺带钉住"它是直接装的"：万一哪天有人把 pytest 加进 requirements-build.txt，
+    # 这两行会先提醒他"依据变了"，而不是让上面那条断言悄悄变成由间接满足。
+    for req in ("requirements_qt.txt", "requirements-build.txt"):
+        text = (ROOT / req).read_text(encoding="utf-8")
+        assert not re.search(r"^pytest", text, re.M), (
+            f"{req} 里现在已经有 pytest 了。打包流水线的 pip install 行还写着 pytest 的话，"
+            "要么删掉多余的字样，要么改这条判据的说明 —— 别让它两处都留着。"
+        )
+
+
 def test_publish_gates_on_ci_and_build():
     """`publish` 必须等打包，且经由 build 传递地等到 ci。"""
     jobs = _load(RELEASE)["jobs"]

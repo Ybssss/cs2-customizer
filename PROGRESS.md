@@ -6,8 +6,14 @@
 > planned, what was tried and rejected, and which claims in the code and in older documents are already
 > known to be wrong. Read it, then verify the specific claim you are about to rely on, in source.
 >
-> **Latest state (2026-09-28, third pass):** The pipeline has now failed **twice** in the same way
-> (runs 36401751401 and 36402772836) and still **no Release exists**. Root cause is finally pinned:
+> **Latest state (2026-09-28, fourth pass):** The concurrency fix (D17) is **confirmed on a runner** —
+> run 36403249454 got past the gate and reached packaging. It then failed one step later, on a
+> **pre-existing** defect in `build-installer.yml`: `build_release.py` runs
+> `tests/test_no_bundled_assets.py` as a pre-build gate (line 951) but the packaging workflow never
+> installed pytest, so it died on `No module named pytest` (entry 6). Fixed by installing pytest in
+> that job and guarded by a test. **Still no Release exists.** The first two failures were self-inflicted
+> and are recorded as superseded; this third one was already broken in the upstream workflow, so it would
+> have hit any release attempt. Earlier in this pass:
 > `ci.yml` groups its runs with `${{ github.workflow }}-${{ github.ref }}`, and in a **called** reusable
 > workflow `github.workflow` resolves to the **callee's** name (`ci`) — so the release's gate and the
 > standalone `ci` run for the same push shared one group and `cancel-in-progress: true` made them kill
@@ -105,6 +111,7 @@ Mark items the owner delegated to the agent as _(delegated)_.
 | **D12** | Release notes and the tag name take their version from `needs.preflight.outputs.version`, never from `GITHUB_REF_NAME`. | At publish time the tag does not exist yet, so there is no ref name to derive a version from. |
 | **D14** | The `ci` gate job carries its own `concurrency`: group `release-gate-${{ github.ref }}`, `cancel-in-progress: false`, and **no `github.workflow` in the group**. | Fixes the self-cancelling gate of entry 4. The invariant is "the gate's group must not depend on `github.workflow`", because in a reusable call that value is not ours to control. |
 | **D17** | **Supersedes D14.** The real fix is in **`ci.yml`**: its `concurrency.group` now uses `${{ github.workflow_ref }}-${{ github.ref }}` (the *caller's* workflow path) instead of `${{ github.workflow }}-${{ github.ref }}`. The caller-side `concurrency` from D14 is **removed** — two mechanisms overlap, and D14 demonstrably did not work. | D14 was tried and disproved by run 36402772836, which failed identically with D14 in place. Invariant, now guarded by a test: a workflow that gets reused must not key its concurrency group on `github.workflow`. |
+| **D18** | The packaging job installs `pytest` alongside the build requirements, rather than adding it to `requirements-build.txt` or switching to `requirements-ci.txt`. | `build_release.py:951` runs a test as a pre-build gate, so the test runner is a **build** dependency. `requirements-build.txt` has an exact-content test (`PyInstaller>=6.21,<7` only) and `requirements-ci.txt` drags in flask / pygame / sounddevice / numpy / pywin32 — neither is the right place. |
 | **D15** | The Release carries **exactly one asset**, the installer `.exe`. The SHA256 moves into the release notes body. | Owner's decision (they asked for "only exe apk", then learned there is no APK). The checksum still ships, and a downloader of only the exe still sees it. |
 | **D16** | This project has **no Android build and no APK is planned**. | It is a Windows-only PyQt5 app: Windows Magnification API, GSI, cfg writes, pywin32 autostart. An APK is a separate port with its own toolchain, not a build flag. Owner informed 2026-09-28. |
 | **D13** | The `ci` job runs again inside `release.yml` on the pushes that actually publish, duplicating the standalone `ci.yml` run for the same push. | Accepted deliberately: the "wait for another workflow" patterns (`workflow_run`) need re-run, staleness and cross-workflow state handling, which is far more machinery than the saved runner minutes. Duplication only happens on version-bump commits. |
@@ -303,14 +310,62 @@ the file red, restoring turned it green: revert the group to `github.workflow`, 
 `workflow_ref`. ⚠ One of those five mutation runs first reported a false pass — the replacement had hit
 the word `cancel-in-progress: true` **inside the new explanatory comment** instead of the setting.
 The mutation was wrong, not the test; re-run with the setting line as the anchor, it goes red.
-**Not verified:** that the gate now actually starts. Only a real run proves that, and the next push is
-that proof.
+
+**Verified on a runner (2026-09-28, run 36403249454, head 27b53ff).** The gate starts. The run is
+`in_progress` instead of dead in 5 seconds, and it carries `ci / test` and `ci / ui-audit` — the
+nested `ci / <job>` names are the reusable workflow's own jobs, and the standalone `ci` run for the
+same commit is running alongside it without either being cancelled. That is the whole claim of D17
+confirmed against GitHub, not against a schema linter.
+
+⏳ **Still unverified downstream of the gate** (as of this writing): PyInstaller, Inno Setup, the
+artifact round trip, `gh release create --target`, and whether v2.3.1 actually appears. This entry
+is being written while that run is still in flight; check the run's conclusion before trusting the
+rest of section 3.
 
 **Not done / open.** Everything downstream of the gate is still unproven: PyInstaller, Inno, the
 artifact round trip, `gh release create --target`. The next push to `main` publishes v2.3.1 for real
 (owner approved 2026-09-28).
 
 **Supersedes.** Entry 4's "Changed"/"Decision(s)" for the concurrency fix, and D14.
+
+### 🟡 Entry 6: The packaging job never installed pytest (2026-09-28)
+
+**What / why.** Run 36403249454 cleared the gate (D17 confirmed) and then failed in the packaging job
+at step 6, "构建 onedir 产物", on one decisive line:
+
+    C:\hostedtoolcache\windows\Python\3.13.15\x64\python.exe: No module named pytest
+    [CMD] ...\python.exe -m pytest -q tests/test_no_bundled_assets.py
+
+`build_tools/build_release.py:951` runs `tests/test_no_bundled_assets.py` as a **pre-build gate**
+(`if not args.skip_tests`), and the packaging workflow installed only `requirements_qt.txt` +
+`requirements-build.txt` (PyInstaller). pytest lives in `requirements-ci.txt`. So the packaging
+workflow has never been able to finish on a clean runner — this is **pre-existing in
+`build-installer.yml`**, not something the release work introduced, and it would have blocked any
+release attempt from this repository.
+
+**Changed.** `.github/workflows/build-installer.yml` — the install step now adds `pytest`, with the
+reason and the reason-not-to-use-`requirements-ci.txt` written next to it.
+`tests/test_release_wiring.py` gained
+`test_packaging_workflow_installs_the_test_runner_the_build_script_calls` (12 cases now): it reads
+`build_release.py`, requires the pre-build gate to still exist, then requires the packaging job's
+`pip install` line to name pytest — and pins that pytest is **not** in `requirements_qt.txt` /
+`requirements-build.txt`, so the assertion cannot be satisfied by accident later.
+
+**Decision(s).** D18.
+
+**Verified.** 12 passed; ruff clean; `actionlint` clean. Three mutations turn the file red and
+restoring turns it green: drop pytest from the install line, delete the whole install line, and remove
+the pre-build gate from `build_release.py`. A fourth mutation (adding pytest to
+`requirements_qt.txt`) was skipped — `pytest` is not currently in that file, so the anchor was absent.
+**Not verified:** that the packaging job now completes. PyInstaller, Inno Setup, the artifact round
+trip and `gh release create --target` are all still unproven.
+
+**Not done / open.** If the next run gets past PyInstaller, the next unproven thing is Inno Setup
+(`choco install innosetup` on the runner) and then the publish job. Keep reading section 5 before
+believing any of it.
+
+**Supersedes.** Nothing; first record of this defect. Corrects the implicit assumption in entries 1,
+3, 4 and 5 that the packaging job worked — it was never actually executed to completion.
 
 ---
 
@@ -326,6 +381,7 @@ remembered from a superseded source is unverified until re-checked.
 | `README.md` / `README.en.md` build section | "**不进 Release**" about `build-installer.yml` | Still true of that workflow alone; it is no longer true of the tag path as a whole. | Kept, re-scoped to "when run on its own". |
 | `build-installer.yml` header | "**它不发布 Release。**" / "本仓库不做二进制分发渠道" | The first half is still true of this file; the second is no longer true of the repository. | Header rewritten to state both halves. |
 | Entries 1 and 3 (2026-09-28) | "The job graph is ready; first proof is a tag push." | The first run cancelled its own CI gate (entry 4). Paper-correct, runtime-wrong. | Superseded by D14 and entry 4. |
+| Entries 1, 3, 4, 5 (2026-09-28) | Implicit: the packaging job installs what the build script needs. | `build-installer.yml` never installed pytest, so `build_release.py`'s pre-build gate could not run. Packaging has never completed on a clean runner. | Corrected by D18 and entry 6. |
 | Entry 4 / D14 (2026-09-28) | "The caller-side `concurrency` on the `ci` gate job stops it cancelling itself." | Wrong. Run 36402772836 failed identically with D14 in place. The group that collides is inside the callee. | Superseded by D17 and entry 5. The failure it was written to fix was real; the fix was not. |
 | Decision D6 (2026-09-28, entry 1) | "Publication trigger is a `v*` tag push only. No manual-dispatch release path." | The pipeline now runs on `push` to `main` and creates the tag itself. | Superseded by D9; kept in the table as history, do not act on it. |
 
@@ -351,7 +407,9 @@ remembered from a superseded source is unverified until re-checked.
 | Changelog extraction | Local run of the embedded python for `2.3.1` and `9.9.9` | found / exit 1 | 2026-09-28 |
 | Mutation checks on `release.yml` | drop `build`/`ci` `if:` · `--target` -> `main` · always-release · drop `gh release view` | each red; restore green | 2026-09-28 |
 | Full test matrix | `python build_tools/run_tests.py` | **not run** — needs pytest on the project interpreter | — |
-| Real release run | `gh run view 36401751401` then `36402772836` | **failed twice**, identically: preflight ok, `ci` job never created, build/publish skipped, no Release. D14 did not fix it; D17 (callee-side group) not yet re-run | 2026-09-28 |
+| Real release run | `gh run view 36401751401`, `36402772836` | **failed twice**, identically: preflight ok, `ci` job never created, build/publish skipped, no Release. D14 did not fix it | 2026-09-28 |
+| Real release run, after D17 | run 36403249454 (head 27b53ff) | gate **started** (`ci / test`, `ci / ui-audit`) with the standalone ci unaffected — D17 confirmed. Then packaging failed: `No module named pytest` | 2026-09-28 |
+| Packaging job | same run, job 108870195018 | failed at step 6 `No module named pytest`; steps 7-10 skipped. D18 not yet re-run | 2026-09-28 |
 
 Isolated venv used for the runs above (created by the agent, outside the repo):
 `C:\Users\YB\AppData\Local\Temp\opencode\cs2venv` (Python 3.11 + `pytest`, `PyYAML`, `ruff`).
