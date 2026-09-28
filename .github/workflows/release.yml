@@ -10,14 +10,13 @@
 # 想每个 commit 都发,那是另一套东西(每个 commit 一个 prerelease 轨),
 # 需要单独开一条流水线,不要往这条里塞。
 #
-# 链路:preflight(要不要发,极便宜) -> ci(全量门禁) -> build(打包) -> publish(建 Release + 自动打 tag)
-# 两个上游以 `uses: ./.github/workflows/<file>` 调用,复用的是同一条打包链路,不是复制一份——
+# 链路:preflight(要不要发,极便宜) -> build(打包) -> publish(建 Release + 自动打 tag)
+# build 复用 `.github/workflows/build-installer.yml` 这条既有打包链路,不是复制一份——
 # 复制的那份会独立腐烂,而且只有副本被修。
 #
-# ⚠️ ci 作业在**同一次 push** 上会和独立的 ci.yml 重复跑一遍。这是故意的取舍:
-#   "等 CI 跑完再接力"那类接法要处理重跑、过期、跨 workflow 传状态,复杂度远高于它省下
-#   的那点机时;而重复只发生在**真的要发版**的那几个 commit 上。平时不抬版本的 push
-#   由 preflight 直接短路,一次 Windows runner 都不起。
+# ⚠️ 这里**没有**测试门禁,是 2026-09-28 的一次明确决定,不是漏了:这个仓库是上游的 fork,
+#   主人的诉求是"编出一个 exe",不是替上游做发布工程。上游的 ci.yml 仍然在每次 push 上
+#   独立跑,只是不挡这条发版链路。详见下面 build 作业上的注释。
 #
 # ⚠️ 附件没有代码签名,Windows SmartScreen 会报"未知发布者"。这是没有签名证书的必然
 #    结果,不是构建问题。发布说明末尾会自动带这一句。
@@ -82,26 +81,24 @@ jobs:
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "::notice::v$ver 还没发过,继续走 CI -> 打包 -> 发版"
 
-  # 1) 全量门禁:ruff + 逐文件测试矩阵 + UI 三把尺子。红了后面两步都不跑。
-  ci:
-    needs: preflight
-    if: needs.preflight.outputs.should_release == 'true'
-    # ⚠ 这里曾经加过一个本作业级的 concurrency,想靠它和独立那条 ci 划开 group。
-    #   **没用**——起作用的是 ci.yml 自己的 group,而在被调用的 workflow 里
-    #   `github.workflow` 解析成的是被调用方的名字(ci),于是两条 run 撞进同一个 group
-    #   互相取消(事故 run 36401751401 / 36402772836:门禁作业连记录都不产生)。
-    #   真正的修法在 ci.yml:它的 group 改用 `github.workflow_ref`,那是**调用方**的
-    #   路径,两边天生不同。测试 tests/test_release_wiring.py 盯着这一条。
-    #   这里保持"不加",免得两套机制叠着,下次再猜是谁在起作用。
-    uses: ./.github/workflows/ci.yml
-
-  # 2) 打包:PyInstaller onedir + Inno Setup 编译安装包,算 SHA256,传 artifact。
+  # 1) 打包:PyInstaller onedir + Inno Setup 编译安装包,算 SHA256,传 artifact。
+  #    ⚠ 这里**曾经**先跑一遍 ci.yml(全量回归 + UI 三把尺子)再打包,那是 D13 的设计。
+  #    2026-09-28 撤掉了,理由是仓库主人明说:他只是 fork 了这个仓库、想编出一个 exe,
+  #    不是这个项目的开发者。实测那两道门禁里 `test` 要 16 分钟(124 个测试文件逐个起
+  #    子进程),而**它一次都没有拦住过任何东西**——拦住发版的三次失败全在
+  #    build-installer.yml 自身(缺 pytest、手搓 iscc、缺中文语言文件),砍掉测试
+  #    一次也避免不了。
+  #    门禁没有白丢:ci.yml 仍然在每次 push 上独立跑(那是上游自己的标准,信息还在
+  #    Actions 页面上),只是**不再挡住**这个 fork 的发版。
+  #    ⚠ 代价,写明白:一个测试矩阵红的提交**也可能**被发成二进制。要恢复这道门,
+  #      把下面 build 的 needs 换回 [preflight, ci] 并把 ci 那个作业加回来即可;
+  #      判据 tests/test_release_wiring.py 里有一条专门盯着"门有没有被悄悄摘掉"。
   build:
-    needs: [preflight, ci]
+    needs: preflight
     if: needs.preflight.outputs.should_release == 'true'
     uses: ./.github/workflows/build-installer.yml
 
-  # 3) 建 Release + 传附件 + 自动打 tag。
+  # 2) 建 Release + 传附件 + 自动打 tag。
   publish:
     name: 建 Release 并上传安装包
     needs: [preflight, build]

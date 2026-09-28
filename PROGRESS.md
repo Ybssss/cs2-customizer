@@ -6,7 +6,18 @@
 > planned, what was tried and rejected, and which claims in the code and in older documents are already
 > known to be wrong. Read it, then verify the specific claim you are about to rely on, in source.
 >
-> **Latest state (2026-09-28, sixth pass):** ISCC now receives correct arguments
+> **Latest state (2026-09-28, seventh pass):** The compiler finally named the blocker, and it was neither
+> of the two things suspected: `installer.iss` line 72 asked for
+> `compiler:Languages\ChineseSimplified.isl`, and official Inno Setup ships only about a dozen
+> languages — **Simplified Chinese is a third-party translation the build machine happened to have**.
+> So `build-installer.yml`'s success depended on what was installed on the machine. The MIT translation
+> (kira-96, Inno 6.5.0+) is now **bundled at `build_tools/Languages/`** and referenced script-relatively;
+> ISCC also now runs with the script's own directory as cwd, which makes the `.iss`'s two different
+> relative bases (`..\release\…` vs bare `installer_assets\…`) resolve identically either way
+> (D21, D22). **And the test gate is gone from the release path** (D23): the owner is a fork maintainer
+> who wants an exe, `test` costs 16 minutes, and that gate never once blocked a real failure — all three
+> were bugs in `build-installer.yml` itself. Release is now `preflight -> build -> publish`, ~8 min.
+> Earlier in this pass: ISCC now receives correct arguments
 > (`[iscc.EXE, installer.iss, /DAppVersion=2.3.1]`, D19) but exits **2 with no output at all** —
 > the compiler's own diagnostics were being swallowed by `build_release.run()`, so the log had
 > nothing but an exit code. Fixed that first (`run()` gained a `capture` switch, on for the compiler
@@ -122,6 +133,9 @@ Mark items the owner delegated to the agent as _(delegated)_.
 | **D12** | Release notes and the tag name take their version from `needs.preflight.outputs.version`, never from `GITHUB_REF_NAME`. | At publish time the tag does not exist yet, so there is no ref name to derive a version from. |
 | **D14** | The `ci` gate job carries its own `concurrency`: group `release-gate-${{ github.ref }}`, `cancel-in-progress: false`, and **no `github.workflow` in the group**. | Fixes the self-cancelling gate of entry 4. The invariant is "the gate's group must not depend on `github.workflow`", because in a reusable call that value is not ours to control. |
 | **D17** | **Supersedes D14.** The real fix is in **`ci.yml`**: its `concurrency.group` now uses `${{ github.workflow_ref }}-${{ github.ref }}` (the *caller's* workflow path) instead of `${{ github.workflow }}-${{ github.ref }}`. The caller-side `concurrency` from D14 is **removed** — two mechanisms overlap, and D14 demonstrably did not work. | D14 was tried and disproved by run 36402772836, which failed identically with D14 in place. Invariant, now guarded by a test: a workflow that gets reused must not key its concurrency group on `github.workflow`. |
+| **D21** | The Simplified Chinese Inno translation is **bundled** at `build_tools/Languages/ChineseSimplified.isl` (MIT, kira-96) and `installer.iss` references it script-relatively instead of via `compiler:`. | `compiler:` resolves against the **compiler's own** Languages folder, which official Inno Setup does not populate with Simplified Chinese, so the build depended on what the machine happened to have (run 36414070599, line 72). Owner's decision: bundle it. |
+| **D22** | ISCC is invoked with the **script's own directory** as `cwd`, not the repo root. | `installer.iss` mixes two relative bases — `..\release\…` for `OutputDir` / `[Files] Source`, bare `installer_assets\…` and `Languages\…` for the icons, wizard art and translation. Fixing cwd makes both interpretations agree, instead of guessing which one Inno uses. |
+| **D23** | **Supersedes D13.** The release path has **no test gate**: `preflight -> build -> publish`. `ci.yml` still runs on every push, it just no longer blocks publishing. | Owner: a fork of the repo, wants an exe, not the upstream developer. `test` is 16 min on the runner and **never once blocked a real failure** — the three that stopped releases were all in `build-installer.yml` (D18, D19, D21). Stated cost: a commit with a red matrix can still ship a binary. Recorded so re-adding the gate is a decision, not a silent "fix". |
 | **D20** | `installer.iss` carries a UTF-8 BOM, and `build_release.run()` gained a `capture` switch used **only** for the ISCC call. | ISCC reads a BOM-less `.iss` as system ANSI, so a file full of Chinese compiles on a cp936 machine and fails on a cp1252 runner. The capture switch exists because that failure produced a log with an exit code and nothing else (entry 8). PyInstaller deliberately keeps streaming: capturing a 15-minute build means a silent log. |
 | **D19** | The installer is compiled by `python build_tools/build_release.py --mode onedir --installer-only`, never by a hand-written `iscc` invocation in shell. | Run 36406788535: git-bash + `\r` from `$(python -c ...)` + MSYS argument conversion on `/DAppVersion=…` made ISCC read the define as a second script filename, and the error pointed nowhere near the cause. The project already owns a hardened path (version read from `config.VERSION`, `find_tool("iscc")` with a "searched these paths" error, `subprocess` with a list so no shell is involved). |
 | **D18** | The packaging job installs `pytest` alongside the build requirements, rather than adding it to `requirements-build.txt` or switching to `requirements-ci.txt`. | `build_release.py:951` runs a test as a pre-build gate, so the test runner is a **build** dependency. `requirements-build.txt` has an exact-content test (`PyInstaller>=6.21,<7` only) and `requirements-ci.txt` drags in flask / pygame / sounddevice / numpy / pywin32 — neither is the right place. |
@@ -492,6 +506,63 @@ was left alone until the log says so.
 **three pre-existing defects in `build-installer.yml` in a row, none of which had ever been
 executed on a runner.**
 
+### 🟡 Entry 9: The build depended on what the build machine had installed (2026-09-28)
+
+**What / why.** The `capture` switch from entry 8 finally produced the compiler's own message, and it
+was neither candidate I had written down:
+
+    Error on line 72 in installer.iss: Couldn't open include file
+    "c:\program files (x86)\inno setup 6\Languages\ChineseSimplified.isl":
+    The system cannot find the file specified.
+
+Line 72 read `MessagesFile: "compiler:Languages\ChineseSimplified.isl"`. The `compiler:` prefix means
+"look in the **compiler's own** Languages folder". Official Inno Setup ships about a dozen languages;
+**Simplified Chinese is a third-party translation**. The upstream author's Chinese Windows had it
+installed; the GitHub runner does not. So the packaging workflow's outcome depended on the build
+machine's installed software — the textbook CI-only failure, and the reason local and CI could never
+be made to agree by tweaking flags.
+
+**Changed.**
+- `build_tools/Languages/ChineseSimplified.isl` — new, bundled: the MIT translation from
+  `kira-96/Inno-Setup-Chinese-Simplified-Translation` (Inno 6.5.0+), stored as UTF-8 **with BOM** for
+  the same reason as the `.iss` itself.
+- `build_tools/installer.iss` — `MessagesFile: "Languages\ChineseSimplified.isl"` (script-relative),
+  with the reason written beside it.
+- `build_tools/build_release.py` — ISCC now runs with `cwd=iss_path.parent` (the script's directory).
+  That also closes the second open candidate from entry 8: the `.iss` uses `..\release\…` for
+  `OutputDir` and `[Files] Source` but bare `installer_assets\…` for the three icon and wizard images.
+  Fixing cwd makes both interpretations resolve the same way, so there is nothing left to guess about.
+- `THIRD-PARTY-NOTICES.md` — a section for the bundled file: source, maintainer (Zhenghan Yang / Kira),
+  MIT, and why it is bundled.
+- `.github/workflows/release.yml` — **the test gate is removed** (D23). `ci.yml` still runs on every
+  push; it no longer blocks this fork's releases.
+- `tests/test_build_installer_step.py` 21 → 24 cases, `tests/test_release_wiring.py` still 13 with
+  `test_publish_gates_on_ci_and_build` rewritten into
+  `test_release_path_deliberately_has_no_test_gate`.
+
+**Decision(s).** D21, D22, D23 (which supersedes D13).
+
+**Verified.** 24 + 13 passed; ruff clean on both test files and `build_release.py`; `actionlint` clean.
+Nine mutations turn the suite red: delete the bundled `.isl`, strip its BOM, revert the `.iss` to
+`compiler:`, revert ISCC's cwd, drop the maintainer credit, drop the source repo, relabel the licence,
+and quietly re-add the `ci` gate to `release.yml`.
+⚠ **Four of my mutations were faulty, not the tests**, and all four were the same mistake: I replaced
+the **first** occurrence of a string, and the first occurrence was somewhere else — a dependency
+table's `MIT`, a comment quoting the old `compiler:Languages`, a `run` signature, the `cancel` in a
+comment. Re-anchored on the unique string and each went red. Related: the notices check originally
+scanned the whole file, where `MIT` appears a dozen times, so relabelling that section's licence
+stayed green until the check was scoped to its own section — the **fourth** time in this project that a
+scan matched the wrong occurrence of a string (workflow comment, a name in two jobs, an `.iss`
+comment quoting the old path, now a licence that appears elsewhere in the document).
+**Not verified:** that the installer now compiles. Everything from here on — the compile, SHA256, the
+artifact round trip, `gh release create --target` — is still unproven.
+
+**Not done / open.** A red test matrix can now ship a binary. Recorded in D23 and enforced by a test
+that asks whoever re-adds the gate to write down why.
+
+**Supersedes.** D13. Entry 8's second open candidate (the mixed relative bases) is now closed by
+construction, not by a fix.
+
 ---
 
 ## 4. Known drift and superseded claims
@@ -538,7 +609,8 @@ remembered from a superseded source is unverified until re-checked.
 | Packaging job | run 36403249454 job 108870195018 | failed at step 6 `No module named pytest`; steps 7-10 skipped. D18 fixed | 2026-09-28 |
 | Gate on a runner | run 36406788535 | `ci / test` and `ci / ui-audit` both success (16 min and 2.9 min) | 2026-09-28 |
 | Packaging job | run 36406788535 job 108881363747 | PyInstaller succeeded; Inno preinstalled (6.7.1); step 8 failed: `You may not specify more than one script filename`. D19 fixed | 2026-09-28 |
-| Packaging job | run 36411234329 job 108896844855 | PyInstaller succeeded; ISCC received correct args; **exit status 2, no compiler output at all**. D20 not yet re-run | 2026-09-28 |
+| Packaging job | run 36411234329 job 108896844855 | PyInstaller succeeded; ISCC received correct args; **exit status 2, no compiler output at all** | 2026-09-28 |
+| Compiler diagnostics | probe run 36414070599 (standalone `build-installer`, no gate) | `capture` switch worked; compiler said: `Couldn't open include file "...\Languages\ChineseSimplified.isl"`. D21/D22 not yet re-run | 2026-09-28 |
 
 Isolated venv used for the runs above (created by the agent, outside the repo):
 `C:\Users\YB\AppData\Local\Temp\opencode\cs2venv` (Python 3.11 + `pytest`, `PyYAML`, `ruff`).

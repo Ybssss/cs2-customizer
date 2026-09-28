@@ -23,6 +23,21 @@ from _denominator import must_scan
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _iss_code(path: Path) -> str:
+    """一份 .iss 的**代码部分**，去掉 `;` 开头的整行注释。
+
+    ⚠ 去注释不是洁癖。`installer.iss` 里有一段注释逐字写着旧的
+    `compiler:Languages\ChineseSimplified.isl`（解释它为什么被换掉），于是扫全文的
+    判据会在**正确的**文件上报红，而真写进 `[Languages]` 的版本反而被注释掩盖。
+    ⭐⭐ **一个字符串出现过，不等于那件事发生过**（本仓记过两次同形的：
+    扫 workflow 文本命中了自己写的解释、以及一个名字出现在两个作业里）。
+    """
+    return "\n".join(
+        line for line in path.read_text(encoding="utf-8-sig").splitlines()
+        if not line.lstrip().startswith(";")
+    )
+
+
 def _load_build_release():
     # build_tools 不是包，按路径直接加载模块。
     module_path = PROJECT_ROOT / "build_tools" / "build_release.py"
@@ -362,6 +377,96 @@ def test_run_does_not_raise_when_check_is_off(monkeypatch):
 # ------------------------------------------------------------- installer.iss
 
 
+ISL = PROJECT_ROOT / "build_tools" / "Languages" / "ChineseSimplified.isl"
+
+
+def test_chinese_language_file_ships_with_the_repo():
+    """中文语言文件必须**随仓库携带**，而且是带 BOM 的 UTF-8。
+
+    **判据记下的是一次真实失败**（2026-09-28，release run 36414070599）：
+
+        Error on line 72 in installer.iss: Couldn't open include file
+        "c:\program files (x86)\inno setup 6\Languages\ChineseSimplified.isl":
+        The system cannot find the file specified.
+
+    `compiler:` 前缀意味着"去**编译器自己**的 Languages 目录里找"，而官方 Inno Setup
+    **只自带十来个语言**，简体中文是第三方翻译：作者的中文 Windows 上装过，GitHub 的
+    windows runner 上没有。于是 `installer.iss` 能不能编过，取决于**构建机碰巧装过什么**
+    —— 那是 CI 与本地跑不出同一个结果的根子。
+
+    BOM 的理由和 `installer.iss` 一模一样：Inno 对没有 BOM 的文件按**系统 ANSI 代码页**
+    解码，而这份翻译通篇是中文。
+    """
+    assert ISL.is_file(), (
+        f"{ISL} 不在了。installer.iss 引用的是随仓库携带的这份翻译；"
+        "官方 Inno Setup 不带简体中文，把它删掉等于让构建重新依赖构建机的已安装内容"
+        "（事故 run 36414070599）。"
+    )
+    raw = ISL.read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf"), (
+        "中文语言文件少了 UTF-8 BOM。没有 BOM 时 Inno 按系统 ANSI 代码页解码它，"
+        "而它通篇是中文。"
+    )
+    text = raw.decode("utf-8")
+    # 得是**语言文件**，不是随便一个带 BOM 的文本：至少要有 [LangOptions] 和消息段。
+    assert "[LangOptions]" in text, "这不是一份 Inno 语言文件（没有 [LangOptions]）"
+    assert "[Messages]" in text, "这不是一份 Inno 语言文件（没有 [Messages]）"
+
+    # .iss 必须按**相对脚本目录**引用它。用 compiler: 前缀就等于把成败交给构建机。
+    iss_text = _iss_code(PROJECT_ROOT / "build_tools" / "installer.iss")
+    assert "compiler:Languages" not in iss_text, (
+        "installer.iss 又用回 `compiler:Languages\\...` 了。那个前缀指的是**编译器自己**"
+        "的 Languages 目录，而简体中文不在官方 Inno Setup 里 —— 事故 run 36414070599。"
+    )
+    assert "MessagesFile: \"Languages\\ChineseSimplified.isl\"" in iss_text, (
+        "installer.iss 没有按相对脚本目录引用随仓库携带的中文语言文件"
+    )
+
+
+def test_third_party_notice_covers_the_bundled_translation():
+    """随仓库携带的第三方翻译必须在 THIRD-PARTY-NOTICES.md **它自己那一节**里署名。
+
+    ⚠ 查的是**那一节**，不是整个文件。THIRD-PARTY-NOTICES.md 里 `MIT` 出现过十几次
+    （整张依赖表都是 MIT），扫全文的话"那一节的许可被改错了"永远绿着。
+    ⭐⭐ 这是同一个形状的第四次：workflow 文本命中自己的注释（`gh release view`）、
+    `gh release view` 出现在另一个作业（发版链路）、`.iss` 注释里逐字写着旧的
+    `compiler:Languages`、现在是 NOTICES 里的 `MIT`。
+    **一个字符串出现过，不等于那件事发生在你以为它出现的地方**——所以每加一条
+    这种判据，都要问一句"我查的范围对吗"。
+    """
+    notices = (PROJECT_ROOT / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    sections = [s for s in notices.split("\n## ") if "ChineseSimplified.isl" in s]
+    must_scan(sections, "THIRD-PARTY-NOTICES.md 里讲那份语言文件的小节", least=1)
+    section = sections[0]
+    for needle in ("ChineseSimplified.isl", "kira-96", "MIT", "Zhenghan Yang", "Inno Setup"):
+        assert needle in section, (
+            f"讲这份语言文件的小节里没有 {needle!r} —— 随仓库携带的第三方翻译需要署名"
+            f"（来源、维护者、许可）。那一节现在是：\n{section[:400]}"
+        )
+    assert "**MIT**" in section, "那一节的许可不是 MIT（这份翻译确实是 MIT）"
+
+
+def test_iscc_runs_from_the_scripts_own_directory():
+    """ISCC 必须以**脚本自己的目录**为工作目录启动。
+
+    ⭐ 理由：这份 .iss 里同时存在两种基准。`OutputDir` / `[Files] Source` 写的是
+    `..\release\…`（Inno 文档里相对**脚本目录**），而 `SetupIconFile` /
+    `WizardImageFile` / `MessagesFile` 写的是**不带 `..`** 的相对路径。如果 Inno 按
+    **当前目录**解释后者，在仓库根下就找不到那三张图和那份语言文件。
+
+    cwd 定在脚本目录，两种解释给出同一个答案——不必去猜 Inno 到底是哪一种，
+    也不必为了"万一"去给每个路径都补上 `..`（那会让两种解释都变得可疑）。
+    """
+    text = (PROJECT_ROOT / "build_tools" / "build_release.py").read_text(encoding="utf-8")
+    assert "cwd=iss_path.parent" in text, (
+        "build_release.py 调 ISCC 时 cwd 不是脚本目录。那份 .iss 混用了两种相对基准，"
+        "cwd 不统一就有找错文件的风险（事故 run 36414070599 就是找错文件）。"
+    )
+    assert "cwd=project_root, capture=True" not in text, (
+        "ISCC 的 cwd 又变回仓库根了"
+    )
+
+
 def test_installer_iss_is_utf8_with_bom():
     """installer.iss 必须是**带 BOM 的 UTF-8** —— 这是 ISCC 读它的前提。
 
@@ -386,7 +491,9 @@ def test_installer_iss_is_utf8_with_bom():
     # 有 BOM 还得真能按 UTF-8 解出来，否则只是加了三字节没意义的标记。
     text = raw.decode("utf-8")
     assert "\ufeff" == text[0], "BOM 应当被解码成 U+FEFF 落在首字符"
-    assert "AppPublisher" in text, "解码之后还得认得出这是那份安装脚本"
+    assert "AppPublisher" in _iss_code(PROJECT_ROOT / "build_tools" / "installer.iss"), (
+        "解码之后还得认得出这是那份安装脚本"
+    )
 
 
 

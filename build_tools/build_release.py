@@ -928,9 +928,18 @@ def build_installer(project_root: Path, version: str, app_name: str) -> Path:
         raise RuntimeError(missing_iscc_message())
     print(f"[INFO] ISCC detected: {iscc}")
 
+    # cwd 用**脚本自己的目录**，不是仓库根。
+    # ⭐ 理由一：这份 .iss 里同时存在两种基准 —— `OutputDir` / `[Files] Source` 写的是
+    #   `..\release\…`（Inno 文档里是相对脚本目录），而 `SetupIconFile` /
+    #   `WizardImageFile` 写的是 `installer_assets\…`（没有 `..`）。如果 Inno 按
+    #   **当前目录**解释后者，那它在仓库根下就找不到那三张图。cwd 定在脚本目录，两种
+    #   解释给出同一个答案，这半个隐患就不存在了——不用去猜 Inno 到底是哪一种。
+    # ⭐ 理由二：`MessagesFile: "Languages\…"` 同理，只有在脚本目录下才对得上随仓库
+    #   携带的那份中文翻译。
+    #
     # capture=True：ISCC 的诊断信息是这条链路上唯一能说清"为什么不编译"的来源，
     # 吞掉它就只剩一个退出码（见 run() 的 docstring 里那次事故）。
-    run([iscc, str(iss_path), f"/DAppVersion={version}"], cwd=project_root, capture=True)
+    run([iscc, str(iss_path), f"/DAppVersion={version}"], cwd=iss_path.parent, capture=True)
 
     installer = expected_installer_path(iss_path, version)
     if not installer.exists():

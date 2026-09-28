@@ -13,6 +13,32 @@
 
 ---
 
+---
+
+## 构建期携带的第三方文件
+
+### Inno Setup 简体中文语言文件（`build_tools/Languages/ChineseSimplified.isl`）
+
+| 项 | 内容 |
+| --- | --- |
+| 内容 | Inno Setup 安装向导的**简体中文**翻译（`[LangOptions]` / `[Messages]` / `[CustomMessages]`） |
+| 来源 | https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation |
+| 维护者 | Zhenghan Yang (Kira) |
+| 许可 | **MIT** |
+| 适用 | Inno Setup **6.5.0+**（构建机为 6.7.1） |
+
+**为什么随仓库携带**：官方 Inno Setup 安装包**只自带十来个语言**，简体中文属于第三方
+翻译。`build_tools/installer.iss` 原先写的是 `compiler:Languages\ChineseSimplified.isl`
+——那个 `compiler:` 前缀意味着"去**编译器自己**的 Languages 目录里找"，于是
+**能不能编过取决于这台机器碰巧装过什么**：作者的中文 Windows 上有，GitHub 的
+windows runner 上没有（实测 2026-09-28 的 release run 36414070599 死于
+`Error on line 72: Couldn't open include file "...\Languages\ChineseSimplified.isl"`）。
+
+把这份 MIT 翻译放进仓库、并把路径改成**相对脚本目录**之后，构建不再依赖构建机的
+已安装内容——这正是"CI 与本地跑出同一个结果"的前提。该文件以 **UTF-8 + BOM** 保存：
+Inno 对没有 BOM 的文件按**系统 ANSI 代码页**解码（`installer.iss` 本身也是同一回事，
+见 `tests/test_build_installer_step.py::test_installer_iss_is_utf8_with_bom`）。
+
 ## 一、本仓库不含任何第三方素材
 
 这一条单独列出，因为它是本仓库与闭源版本最大的分发差异：

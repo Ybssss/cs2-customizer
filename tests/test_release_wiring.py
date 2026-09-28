@@ -140,7 +140,7 @@ def test_release_runs_on_main_push_and_on_version_tags():
 def test_preflight_short_circuits_unreleased_pushes():
     """不抬版本的 push 必须被 preflight 短路，且短路信号要真的接到了下游。"""
     jobs = _load(RELEASE)["jobs"]
-    must_scan(list(jobs), "release.yml 的作业", least=4)
+    must_scan(list(jobs), "release.yml 的作业", least=3)
 
     preflight = jobs.get("preflight")
     assert preflight, (
@@ -151,9 +151,8 @@ def test_preflight_short_circuits_unreleased_pushes():
     assert "should_release" in outputs, "preflight 没有 should_release 输出，下游无从短路"
     assert "version" in outputs, "preflight 没有 version 输出，发布说明和 tag 就没有版本号来源"
 
-    # 三个花钱的作业每一个都要挂在同一个条件上。漏挂一个的后果不同：
-    # ci 漏挂 = 测试门禁形同虚设；build/publish 漏挂 = 短路失效，packaging 白跑。
-    for name in ("ci", "build", "publish"):
+    # 每个花钱的作业都要挂在同一个条件上。漏挂的后果是短路失效，packaging 白跑。
+    for name in ("build", "publish"):
         cond = str(jobs[name].get("if", ""))
         assert "should_release" in cond, (
             f"作业 {name} 没有挂在 preflight 的 should_release 上（if={cond!r}）"
@@ -216,10 +215,17 @@ def test_reused_workflow_concurrency_group_is_caller_specific():
     )
 
     # 调用方不再自带第二套并发机制：两套机制叠着，下次出问题没人说得清是谁在起作用。
-    assert "concurrency" not in (_load(RELEASE)["jobs"]["ci"]), (
-        "release.yml 的 ci 调用作业又加回了 concurrency。"
-        "曾经试过用它来划开 group，没用（那两次事故），留着只会让人以为它在起作用。"
-    )
+    # （release.yml 现在调用的是 build-installer.yml，那条链路没有 concurrency；
+    #  这里盯着 ci.yml 是因为它仍然带 workflow_call 入口——判据防的是"将来又被谁
+    #  复用一次"，而不是某一次具体的调用。）
+    reusable_jobs = [
+        name for name, job in _load(RELEASE)["jobs"].items() if job.get("uses")
+    ]
+    for name in reusable_jobs:
+        assert "concurrency" not in _load(RELEASE)["jobs"][name], (
+            f"release.yml 的 {name} 调用作业又加回了 concurrency。"
+            "曾经试过用它来划开 group，没用（那两次事故），留着只会让人以为它在起作用。"
+        )
 
 
 def test_release_contains_only_the_installer():
@@ -320,29 +326,47 @@ def test_installer_is_compiled_by_the_build_script_not_by_hand():
     )
 
 
-def test_publish_gates_on_ci_and_build():
-    """`publish` 必须等打包，且经由 build 传递地等到 ci。"""
+def test_release_path_deliberately_has_no_test_gate():
+    """发版链路上**没有**测试门禁 —— 这是 2026-09-28 的明确决定，不是漏了。
+
+    这条判据把**决定**钉住，而不是钉住"缺少某个东西"。要恢复门禁的人会在这里看到一段
+    写明的账，然后**有意识地**改，而不是以为自己在修一个遗漏。
+
+    **为什么撤掉（主人原话大意：他只是 fork 了这个仓库、想编出一个 exe，不是这个项目的
+    开发者）：**
+
+    - `ci.yml` 的 `test` 作业在 runner 上要 **16 分钟**（124 个测试文件逐个起子进程），
+      `ui-audit` 3 分钟；两条本来就是并行作业，所以 3 分钟那部分**不在关键路径上**，
+      撤掉它一秒都不省。
+    - 更要紧的是：**这道门一次都没有拦住过任何东西。** 拦住发版的三次失败全在
+      `build-installer.yml` 自身——缺 pytest（D18）、手搓 iscc 参数被搅坏（D19）、
+      缺中文语言文件（D21）。砍掉测试，那三次一次也避免不了。
+    - 门禁没有白丢：`ci.yml` 仍然在每次 push 上**独立跑**，那是上游自己的标准，
+      信息还在 Actions 页面上；只是不再挡住这个 fork 发版。
+
+    **代价，写明白**：一个测试矩阵红的提交**也可能**被发成二进制。要恢复这道门，把
+    `build` 的 `needs` 换回 `[preflight, ci]` 并把 `ci` 作业加回来，同时在
+    `PROGRESS.md` 的 Decisions 里追加一行说明为什么改主意——**不要静悄悄地改**。
+    """
     jobs = _load(RELEASE)["jobs"]
-    must_scan(list(jobs), "release.yml 的作业", least=4)
+    must_scan(list(jobs), "release.yml 的作业", least=3)
 
-    assert "ci" in jobs, "release.yml 里没有 ci 作业：发版就不受测试门禁保护了"
-    assert "build" in jobs, "release.yml 里没有 build 作业：附件从哪来？"
-
-    assert "ci" in _needs(jobs["build"]), (
-        "build 必须在 ci 之后跑 —— 门禁红了就不该再花机时打包。"
+    assert "ci" not in jobs, (
+        "release.yml 又加回了 ci 门禁。如果这是有意的(例如想恢复'测试不绿就不发版'),"
+        "请在 PROGRESS.md 的 Decisions 里追加一行说明为什么,并把本条判据改成新的形状;"
+        "不要让它以'修复遗漏'的名义悄悄回来。"
     )
+    for name, job in jobs.items():
+        assert not str(job.get("uses", "")).endswith("ci.yml"), (
+            f"作业 {name} 又调起了 ci.yml —— 同上,这是门禁,不是打包。"
+        )
+    # publish 仍然必须等 build:dist/ 是空的就去建 Release,会留下一个
+    # 看起来发布成功、下载却 404 的 Release。这条与门禁撤不撤无关。
     assert "build" in _needs(jobs["publish"]), (
-        "publish 没有 needs: build —— 它会在 dist/ 还是空的时候就建 Release，"
-        "留下一个看起来发布成功、下载却 404 的 Release。"
+        "publish 没有 needs: build —— 它会在 dist/ 还是空的时候就建 Release。"
     )
-
-    # ci 必须是 publish 的**传递**依赖。只写 `needs: build` 一层是对的（不重复声明），
-    # 所以这里量的是可达性：谁把 build 的 needs 改成空，测试门禁就在发版链路上消失了，
-    # 而 workflow 文件本身仍然合法、不报任何错。
-    reachable = _reachable(jobs, "publish")
-    assert "ci" in reachable, (
-        f"publish 的传递依赖是 {sorted(reachable)}，里面没有 ci —— "
-        "测试门禁已经不在发版链路上了。"
+    assert "preflight" in _needs(jobs["build"]), (
+        "build 必须挂在 preflight 的短路上,否则不抬版本的 push 也会起 Windows runner。"
     )
 
 

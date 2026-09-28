@@ -69,7 +69,14 @@ VersionInfoDescription={#AppName} 安装程序
 VersionInfoProductName={#AppName}
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; ⚠ 原来这里写的是 `compiler:Languages\ChineseSimplified.isl` —— 那个 `compiler:` 前缀
+; 意思是"去**编译器自己**的 Languages 目录里找"。官方 Inno Setup 只自带十来个语言,
+; **简体中文是第三方翻译**,官方安装包里没有:在作者的中文 Windows 上有(他装过),
+; 在 GitHub 的 windows runner 上没有,于是 2026-09-28 的 release run 36414070599 死在
+;   Error on line 72: Couldn't open include file "...\Languages\ChineseSimplified.isl"
+; 所以那份翻译**随仓库走**(build_tools/Languages/,MIT,见 THIRD-PARTY-NOTICES.md),
+; 路径改成相对脚本目录:构建不再依赖"这台机器碰巧装过什么"。
+Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 
 [Messages]
 chinesesimplified.WelcomeLabel1=欢迎安装 [name]
