@@ -1,23 +1,13 @@
 # CI 专用依赖(GitHub Actions windows-latest)。
-# 口径:tests/ 全量回归所需的最小集 = requirements_qt.txt + 运行时实际 import 的包。
-# 来源取证:.build/_probe_imports.py 全库 import 扫描(2026-06-12)。
+# 口径:tests/ 全量回归所需的最小集 = 运行时依赖 + pytest。
+#
+# ⚠ 下面这些包以前在这里**又抄了一遍**(flask / pygame / keyboard / pynput / pywin32 /
+#   pypinyin / numpy / sounddevice / soundfile / PyYAML),而打包流水线装的是另一份,
+#   于是"CI 绿、打包出来的 exe 缺 flask"—— 同一份依赖写两遍,必然有一处会腐烂。
+#   现在运行时依赖只在 requirements.txt 里存在一份,这里引用它。
+#   教训与 PyYAML 那条同源:"本地全绿"不等于"依赖声明完整",只有干净环境能证明。
 -r requirements_qt.txt
+-r requirements.txt
 
+# 测试驱动(build_tools/run_tests.py 逐文件子进程隔离;build_release.py 打包前也跑一条)
 pytest>=8.0
-flask>=3.0
-pygame>=2.6
-keyboard>=0.13
-pynput>=1.7
-pywin32>=306
-# 设置搜索拼音层(R1-2 新增)
-pypinyin>=0.53
-# 音量归一化测试链路(CI #6 实锤缺失)
-numpy>=1.26
-# 语音输出页 import 链(voice_output_manager 顶层:sounddevice/soundfile/numpy/pygame/keyboard)
-sounddevice>=0.4
-soundfile>=0.12
-# CI 工作流自校验（tests/test_lazy_imports_r8a.py 解析 .github/workflows/ci.yml）。
-# 2026-08-12 由 CI 第一次真实运行逮到：本机一直有 PyYAML（教程流水线的依赖，
-# 开源裁剪时那份 requirements 被排除了），于是这条测试在本地恒绿、在 CI 恒红。
-# 教训："本地全绿"不等于"依赖声明完整"，只有干净环境能证明这件事。
-PyYAML>=6.0

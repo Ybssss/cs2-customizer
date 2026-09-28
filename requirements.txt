@@ -1,0 +1,46 @@
+# CS2 Customizer — 核心运行依赖（**不是** Qt 专用）
+#
+# ⚠⚠ 这个文件本来就应该存在，而开源裁剪时**没有带进来**。
+# `requirements_qt.txt` 里逐字写着：
+#     注意事项：核心运行依赖在 requirements.txt 里（不是 Qt 专用）
+#     - customtkinter（改版需要） - pygame（音频系统） - **flask（GSI 服务器）** - 等等…
+# 也就是说：**只装 requirements_qt.txt 装不出一个能跑起来的程序。**
+#
+# 后果已经发生两次，两次都静默：
+#  1. 按 README 装依赖再 `python main_widget.py`：`ModuleNotFoundError: flask`。
+#     `gsi_server.py:7` 是**顶层** `from flask import Flask, …`，而 GSI 接收端由主窗口
+#     启动 —— 缺 flask 就等于程序起不来。开发机上碰巧全局装过 flask，所以从没暴露。
+#  2. 打包产物缺 flask：2026-09-28 第一次成功发布的 v2.3.1，双击即崩
+#     `Failed to execute script 'main_widget' … No module named 'flask'`。
+#     打包流水线装的是 requirements_qt.txt + requirements-build.txt，于是**冻进 exe 的
+#     只有 Qt 那一半**。
+#
+# 为什么 CI 一直是绿的：requirements-ci.txt 当时把下面这些包**又抄了一遍**，
+# CI 装得到，打包装不到。同一份依赖写两遍，就一定有一处会腐烂——这次烂在打包那一侧。
+# 现在 requirements-ci.txt 改为 `-r requirements.txt`，**只留一份**。
+#
+# 版本下限与原 requirements-ci.txt 逐条一致，**没有改动任何一个约束**。
+
+# --- GSI 接收端（gsi_server.py 顶层 import）-------------------------
+flask>=3.0
+
+# --- 音频：音乐播放器 / 击杀音效 / 语音输出（pygame + 设备 + 归一化）---
+pygame>=2.6
+sounddevice>=0.4
+soundfile>=0.12
+numpy>=1.26
+
+# --- 全局热键（跨进程 listening，pywin32 是其 Windows 后端）----------
+keyboard>=0.13
+pynput>=1.7
+# 开机自启注册表（core/utils/autostart.py）、系统音量（core/audio 设备枚举）
+pywin32>=306
+
+# --- 设置页搜索的拼音层（R1-2）----------------------------------------
+pypinyin>=0.53
+
+# --- YAML 解析：CI 自校验与配置 ---------------------------------------
+# 2026-08-12 由 CI 第一次真实运行逮到：本机一直有 PyYAML（教程流水线的依赖，
+# 开源裁剪时那份 requirements 被排除了），于是那条测试在本地恒绿、在 CI 恒红。
+# 教训："本地全绿"不等于"依赖声明完整"，只有干净环境能证明这件事。
+PyYAML>=6.0

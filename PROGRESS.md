@@ -6,7 +6,18 @@
 > planned, what was tried and rejected, and which claims in the code and in older documents are already
 > known to be wrong. Read it, then verify the specific claim you are about to rely on, in source.
 >
-> **Latest state (2026-09-28, seventh pass):** The compiler finally named the blocker, and it was neither
+> **Latest state (2026-09-28, eighth pass):** The pipeline **finally published** — and the exe it
+> published does not run. The owner launched it and got `Failed to execute script 'main_widget' … No
+> module named 'flask'`. Root cause is structural, not a missing line: `requirements_qt.txt` says in
+> its own comments that the core runtime deps live in **`requirements.txt`** — that file was never
+> carried into the open-source subset, and the only place those packages were listed was
+> `requirements-ci.txt`, which had **copied them a second time**. So CI installed them and packaging
+> did not. Fixed by adding `requirements.txt` (flask / pygame / keyboard / pynput / pywin32 /
+> pypinyin / numpy / sounddevice / soundfile / PyYAML, every version bound unchanged),
+> `requirements-ci.txt` now references it instead of duplicating it, and the packaging job installs
+> it (D24). A new test walks the app's **module-level unguarded imports** and requires each to be
+> declared — it would have been red before v2.3.1 shipped (D25). **v2.3.1 is still published and
+> still broken**; see the open question at the end of section 3. Earlier in this pass: The compiler finally named the blocker, and it was neither
 > of the two things suspected: `installer.iss` line 72 asked for
 > `compiler:Languages\ChineseSimplified.isl`, and official Inno Setup ships only about a dozen
 > languages — **Simplified Chinese is a third-party translation the build machine happened to have**.
@@ -133,6 +144,8 @@ Mark items the owner delegated to the agent as _(delegated)_.
 | **D12** | Release notes and the tag name take their version from `needs.preflight.outputs.version`, never from `GITHUB_REF_NAME`. | At publish time the tag does not exist yet, so there is no ref name to derive a version from. |
 | **D14** | The `ci` gate job carries its own `concurrency`: group `release-gate-${{ github.ref }}`, `cancel-in-progress: false`, and **no `github.workflow` in the group**. | Fixes the self-cancelling gate of entry 4. The invariant is "the gate's group must not depend on `github.workflow`", because in a reusable call that value is not ours to control. |
 | **D17** | **Supersedes D14.** The real fix is in **`ci.yml`**: its `concurrency.group` now uses `${{ github.workflow_ref }}-${{ github.ref }}` (the *caller's* workflow path) instead of `${{ github.workflow }}-${{ github.ref }}`. The caller-side `concurrency` from D14 is **removed** — two mechanisms overlap, and D14 demonstrably did not work. | D14 was tried and disproved by run 36402772836, which failed identically with D14 in place. Invariant, now guarded by a test: a workflow that gets reused must not key its concurrency group on `github.workflow`. |
+| **D24** | The core runtime dependencies live in a new **`requirements.txt`**, which `requirements_qt.txt` already referred to; `requirements-ci.txt` references it instead of listing those packages a second time; the packaging job installs it. | The first published Release (v2.3.1) could not start: `No module named 'flask'`. The dependency was not missing from the *code*, it was missing from the *packaging input* — and CI stayed green precisely because the list had been copied in two places. |
+| **D25** | A test walks the app's **module-level, unguarded** imports and requires every one to be declared in `requirements_qt.txt` + `requirements.txt`, and requires the packaging job to install that set. | The gap that shipped a broken binary. Deliberately scoped to module-level unguarded imports: a function-body import is lazy (this app lazy-loads pages), and a `try/except`-guarded import is an intentional optional dependency — declaring those would change product behaviour by enabling fallback paths the author left disabled. Recorded limitation: guarding a hard import turns this test green while only converting a crash into a silent degradation. |
 | **D21** | The Simplified Chinese Inno translation is **bundled** at `build_tools/Languages/ChineseSimplified.isl` (MIT, kira-96) and `installer.iss` references it script-relatively instead of via `compiler:`. | `compiler:` resolves against the **compiler's own** Languages folder, which official Inno Setup does not populate with Simplified Chinese, so the build depended on what the machine happened to have (run 36414070599, line 72). Owner's decision: bundle it. |
 | **D22** | ISCC is invoked with the **script's own directory** as `cwd`, not the repo root. | `installer.iss` mixes two relative bases — `..\release\…` for `OutputDir` / `[Files] Source`, bare `installer_assets\…` and `Languages\…` for the icons, wizard art and translation. Fixing cwd makes both interpretations agree, instead of guessing which one Inno uses. |
 | **D23** | **Supersedes D13.** The release path has **no test gate**: `preflight -> build -> publish`. `ci.yml` still runs on every push, it just no longer blocks publishing. | Owner: a fork of the repo, wants an exe, not the upstream developer. `test` is 16 min on the runner and **never once blocked a real failure** — the three that stopped releases were all in `build-installer.yml` (D18, D19, D21). Stated cost: a commit with a red matrix can still ship a binary. Recorded so re-adding the gate is a decision, not a silent "fix". |
@@ -563,6 +576,63 @@ that asks whoever re-adds the gate to write down why.
 **Supersedes.** D13. Entry 8's second open candidate (the mixed relative bases) is now closed by
 construction, not by a fix.
 
+### 🔴 Entry 10: The first published Release could not start (2026-09-28)
+
+**What / why.** Run 36415053429 succeeded — the pipeline's first green end-to-end, and it created
+Release **v2.3.1** with the installer attached. The owner launched the exe and got:
+
+    Failed to execute script 'main_widget' due to unhandled exception:
+    No module named 'flask'
+
+**Root cause — one promise, no file behind it.** `requirements_qt.txt` carries this comment:
+
+    注意事项：核心运行依赖在 requirements.txt 里（不是 Qt 专用）
+    - customtkinter（改版需要） - pygame（音频系统） - **flask（GSI 服务器）** - 等等…
+
+**`requirements.txt` does not exist in this repository** — the open-sourcing did not carry it. The
+only place those packages were listed was `requirements-ci.txt`, which had **copied them a second
+time** to make CI work. So: CI installed flask, packaging installed `requirements_qt.txt` only, and
+`gsi_server.py:7`'s top-level `from flask import Flask, request, jsonify` — the GSI receiver the
+main window starts — was simply absent from the frozen app. The developer's machine had flask
+installed globally, so nothing had ever shown it.
+
+**Changed.**
+- `requirements.txt` — **new**: flask, pygame, sounddevice, soundfile, numpy, keyboard, pynput,
+  pywin32, pypinyin, PyYAML. Every version bound identical to what `requirements-ci.txt` had
+  (verified programmatically, spec by spec). Its header states the two failures this file prevents.
+- `requirements-ci.txt` — now `-r requirements_qt.txt` + `-r requirements.txt` + `pytest>=8.0`.
+  The duplicated list is gone, so the next dependency change cannot rot in one place only.
+- `.github/workflows/build-installer.yml` — installs the runtime set.
+- `README.md` / `README.en.md` — the documented local-run and build commands now install
+  `requirements.txt`; without this, a clean machine following the README hits the same crash.
+- `tests/test_runtime_dependency_coverage.py` — **new**, 4 cases (D25).
+- `THIRD-PARTY-NOTICES.md` — the two lines that named the source of version bounds now include
+  `requirements.txt`.
+
+**Decision(s).** D24, D25.
+
+**Verified.** 4 passed. Four mutations go red, and one correctly goes green:
+delete `flask` from the requirements (the accident itself), drop `-r requirements.txt` from the
+packaging job, copy `flask` back into `requirements-ci.txt`, delete `requirements.txt` — all red;
+and wrapping `gsi_server.py`'s flask import in `try/except ImportError` goes **green**, because a
+guarded import is by definition optional. That is the check reporting the code's intent faithfully,
+and it is written down as a limitation in the test: it converts a crash into a silent degradation,
+so taking that route has to be a documented decision.
+**Not verified:** that a rebuilt exe actually starts. That needs one more build.
+
+**Not done / open — the owner's call, and it is a public artifact.** Release **v2.3.1** is
+published, tagged, and broken. Three ways out, none of which I will take unasked:
+1. bump `config.VERSION` to 2.3.2 (+ a `## [2.3.2]` CHANGELOG section) and let the pipeline publish a
+   working build; v2.3.1 stays as the broken first attempt;
+2. additionally delete the v2.3.1 Release and its remote tag, so nobody downloads a broken exe —
+   irreversible for anyone who already did;
+3. leave it and just fix forward.
+
+**Supersedes.** Nothing. Corrects D18's reasoning, which used "requirements-ci.txt drags in flask /
+pygame / sounddevice / numpy / pywin32" as an argument *against* using it — that drag was not
+incidental noise, it was the symptom: the packaging job was installing a set that cannot run the
+app, and I read the extra packages as a reason to avoid them rather than as evidence of the hole.
+
 ---
 
 ## 4. Known drift and superseded claims
@@ -577,6 +647,7 @@ remembered from a superseded source is unverified until re-checked.
 | `README.md` / `README.en.md` build section | "**不进 Release**" about `build-installer.yml` | Still true of that workflow alone; it is no longer true of the tag path as a whole. | Kept, re-scoped to "when run on its own". |
 | `build-installer.yml` header | "**它不发布 Release。**" / "本仓库不做二进制分发渠道" | The first half is still true of this file; the second is no longer true of the repository. | Header rewritten to state both halves. |
 | Entries 1 and 3 (2026-09-28) | "The job graph is ready; first proof is a tag push." | The first run cancelled its own CI gate (entry 4). Paper-correct, runtime-wrong. | Superseded by D14 and entry 4. |
+| D18 (2026-09-28) | "requirements-ci.txt drags in flask / pygame / sounddevice / numpy / pywin32 — neither is the right place." | That drag was the symptom, not noise: the packaging job was installing a set that **cannot run the app**, and I read it as a reason to avoid the file rather than as evidence of the missing `requirements.txt`. | Corrected by D24 and entry 10. |
 | Entries 1, 3, 4, 5 (2026-09-28) | Implicit: the packaging workflow's steps work as written. | Twice false in a row: the pytest gap (entry 6) and the hand-rolled `iscc` call (entry 7). Both pre-existing in `build-installer.yml`; neither had ever been executed on a runner. | Corrected by D18/D19. Treat "it works on my machine" as unproven for every step in this file. |
 | Entries 1, 3, 4, 5 (2026-09-28) | Implicit: the packaging job installs what the build script needs. | `build-installer.yml` never installed pytest, so `build_release.py`'s pre-build gate could not run. Packaging has never completed on a clean runner. | Corrected by D18 and entry 6. |
 | Entry 4 / D14 (2026-09-28) | "The caller-side `concurrency` on the `ci` gate job stops it cancelling itself." | Wrong. Run 36402772836 failed identically with D14 in place. The group that collides is inside the callee. | Superseded by D17 and entry 5. The failure it was written to fix was real; the fix was not. |
@@ -604,7 +675,9 @@ remembered from a superseded source is unverified until re-checked.
 | Changelog extraction | Local run of the embedded python for `2.3.1` and `9.9.9` | found / exit 1 | 2026-09-28 |
 | Mutation checks on `release.yml` | drop `build`/`ci` `if:` · `--target` -> `main` · always-release · drop `gh release view` | each red; restore green | 2026-09-28 |
 | Full test matrix | `python build_tools/run_tests.py` | **not run** — needs pytest on the project interpreter | — |
-| Real release run | `gh run view 36401751401`, `36402772836` | **failed twice**, identically: preflight ok, `ci` job never created, build/publish skipped, no Release. D14 did not fix it | 2026-09-28 |
+| **Published Release** | launch the v2.3.1 exe | **`No module named 'flask'` — the artifact does not run.** Fixed by D24, not yet rebuilt | 2026-09-28 |
+| Real release run | run 36415053429 | **success** — Release v2.3.1 created with the installer attached | 2026-09-28 |
+| Earlier release runs | `gh run view 36401751401`, `36402772836` | **failed twice**, identically: preflight ok, `ci` job never created, build/publish skipped, no Release. D14 did not fix it | 2026-09-28 |
 | Real release run, after D17 | run 36403249454 (head 27b53ff) | gate **started** (`ci / test`, `ci / ui-audit`) with the standalone ci unaffected — D17 confirmed. Then packaging failed: `No module named pytest` | 2026-09-28 |
 | Packaging job | run 36403249454 job 108870195018 | failed at step 6 `No module named pytest`; steps 7-10 skipped. D18 fixed | 2026-09-28 |
 | Gate on a runner | run 36406788535 | `ci / test` and `ci / ui-audit` both success (16 min and 2.9 min) | 2026-09-28 |

@@ -170,7 +170,7 @@ Nine themes ship with the app; four of them (dark / light / ocean / rose):
 ```bash
 git clone https://github.com/gufan0000/cs2-customizer.git
 cd cs2-customizer
-pip install -r requirements_qt.txt
+pip install -r requirements_qt.txt -r requirements.txt
 python main_widget.py
 ```
 
@@ -243,7 +243,7 @@ resources/
 ## Building a release
 
 ```bash
-pip install -r requirements_qt.txt -r requirements-build.txt
+pip install -r requirements_qt.txt -r requirements.txt -r requirements-build.txt
 python build_tools/build_release.py --mode onedir --no-obfuscate --without-bundled-assets
 ```
 

@@ -151,7 +151,7 @@ GSI 在完全默认的官方游戏环境下就能工作：**不需要修改任�
 ```bash
 git clone https://github.com/gufan0000/cs2-customizer.git
 cd cs2-customizer
-pip install -r requirements_qt.txt
+pip install -r requirements_qt.txt -r requirements.txt
 python main_widget.py
 ```
 
@@ -230,7 +230,7 @@ resources/
 ## 构建发布包
 
 ```bash
-pip install -r requirements_qt.txt -r requirements-build.txt
+pip install -r requirements_qt.txt -r requirements.txt -r requirements-build.txt
 python build_tools/build_release.py --mode onedir --no-obfuscate --without-bundled-assets
 ```
 

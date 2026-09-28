@@ -6,7 +6,7 @@
 本项目自身的代码以 **GPL-3.0-or-later** 授权，见仓库根目录 `LICENSE`。
 下列第三方组件**不受**本项目许可证约束，各自适用其原始许可证。
 
-版本约束取自仓库内的 `requirements_qt.txt` / `requirements-ci.txt` / `requirements-build.txt`。
+版本约束取自仓库内的 `requirements_qt.txt` / `requirements.txt` / `requirements-ci.txt` / `requirements-build.txt`。
 这些文件只锁下限（`>=`），因此**某次具体发布实际装了哪些精确版本**，以该次发布随附的
 `requirements.lock.txt`（由 `build_tools/freeze_release_deps.py` 生成的 `pip freeze` 快照）为准。
 本文件描述的是依赖**集合与授权性质**，不是精确版本清单。
@@ -152,7 +152,7 @@ LGPL-3.0 第 4 条（Combined Works）规定：当你分发一个"把 LGPL 库�
 
 ## 三、运行时依赖
 
-来自 `requirements_qt.txt` 及 `requirements-ci.txt` 中运行时实际 import 的部分。
+来自 `requirements_qt.txt` 与 `requirements.txt`（两者合起来就是运行时实际 import 的那部分）。
 
 | 依赖 | 版本约束 | 许可证 | 项目主页 | 备注 |
 | --- | --- | --- | --- | --- |
