@@ -31,9 +31,13 @@
 > 本仓库是它裁出来的**开源功能子集**，以 **GPL-3.0** 授权，保留全部本地功能。
 > 两者相互独立，装在同一台机器上互不干扰（安装目录、数据目录、开机自启项都是分开的）。
 >
-> **本仓库不发布 Release 安装包。** 想要二进制就去官网；想要 **GPL-3.0 授权的**
-> 二进制，请按 [构建发布包](#构建发布包) 自己编译一份——
-> 官网那个包**不是**本仓库这份代码的构建产物，别把它当成 GPL 版本再分发。
+> **本仓库的 Release 里就有安装包。** 改了 `config.py` 的版本号并 push 到 `main`，
+> [`.github/workflows/release.yml`](.github/workflows/release.yml) 自动跑 CI 全量门禁、
+> 在 Windows 上构建、建 Release（并打上 tag），附件是 `CS2Customizer-Setup-<版本>.exe`
+> 和它的 `.sha256`——**这就是本仓库这份 GPL-3.0 源码的构建产物**。详见
+> [发一个 Release](#发一个-release)。
+> 想要闭源商业版（带账号、云同步、联网功能）去官网；官网那个包**不是**本仓库这份代码的
+> 构建产物，别把它当成 GPL 版本再分发。
 
 ---
 
@@ -240,12 +244,46 @@ python build_tools/build_release.py --mode onedir --no-obfuscate --without-bundl
 
 Windows 安装包用 [Inno Setup](https://jrsoftware.org/isinfo.php) 编译 `build_tools/installer.iss`。
 
-打 `v*` 标签（或手工触发）会跑
-[`.github/workflows/build-installer.yml`](.github/workflows/build-installer.yml)：
-在 Windows runner 上完整走一遍上面的构建 + Inno Setup 编译。
+### 发一个 Release
 
-它是**打包链路的门禁，不是分发渠道**——产物只作为 artifact 留 90 天供排查，
-**不进 Release**。留着它是因为打包链路自己就是一类缺陷的产地，而 `ci.yml` 不碰它：
+**改 `config.py` 的 `VERSION`，再 push 到 `main`。就这样，没有第二步。**
+
+```bash
+# 1) 抬版本号（唯一真源）+ 写 CHANGELOG.md 的 `## [新版本]` 小节
+# 2) 提交、推送
+git push origin main
+```
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) 由这次 push 自动起来，
+四步串联：
+
+1. **preflight**（几秒钟）：拿 `config.py` 的 `VERSION` 问 GitHub「`v<版本>` 这个 Release
+   是不是已经存在」。**已经存在就到此为止**——不抬版本的日常 push 一次 Windows runner
+   都不起；
+2. `ci.yml` 全量门禁（ruff + 逐文件测试矩阵 + UI 三把尺子）——红了后面两步都不跑；
+3. `build-installer.yml` 在 Windows runner 上完整走一遍构建 + Inno Setup 编译，算 SHA256；
+4. `publish` 作业拿第 3 步的 artifact 建 GitHub Release，**tag 由它建在这次 push 的那个
+   提交上**（`--target`），发布说明自动取 `CHANGELOG.md` 里 `## [版本号]` 那一节
+   （**抽不到就失败**，不会留下空 Release）。
+
+附件是 `CS2Customizer-Setup-<版本>.exe` 和 `CS2Customizer-Setup-<版本>.exe.sha256`。
+
+几个刻意的设计，别绕过去：
+
+- **发版的触发点是版本号，不是 commit。** 同一个版本只会发一次；想发新版本就抬 `VERSION`。
+  想要"每个 commit 都有一份可下载的构建"，那是另一条 prerelease 流水线，不在这条里。
+- **一个 tag 对应一个 Release，且必然对应构建它的那次提交。** 中间状态（远端已有 `v<版本>`
+  这个 tag、却没有 Release）会**响亮失败**而不是硬发——那种情况下页面会显示"已发布"，
+  下载到的却不是这次构建的东西。
+- 打包那一步同时会校验 tag（若手工推过）与 `config.py` 的 `VERSION` 一致，
+  不会产出"标签写 v2.3.1、exe 属性却写 2.3.0"的包。
+
+⚠️ 附件**没有代码签名**，Windows SmartScreen 会报"未知发布者"。这是没有签名证书的
+必然结果，不是构建问题。⚠️ Release 建出来就是对外可见的：想撤回得删掉 Release 和远端 tag，
+已经下载走的东西收不回来。
+
+`build-installer.yml` 单独跑（手工触发）时**不建 Release**，产物只作为 artifact 留 90 天
+供排查。留着这条独立入口是因为打包链路自己就是一类缺陷的产地，而 `ci.yml` 不碰它：
 onedir / onefile 两条分支的行为曾经不对称（onedir 会炸而 onefile 静默产出空包）、
 发布包曾经把打包机的活配置带进产物、Inno 脚本的 AppId 写错要装完才发现。
 这些只有真的构建一次才会暴露。

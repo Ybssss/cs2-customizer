@@ -22,6 +22,10 @@
 name: ci
 
 on:
+  # 被 release.yml 以 `uses: ./.github/workflows/ci.yml` 调用:发版前先要这道门禁全绿,
+  # 不拿没跑过测试的包去建 Release。workflow_call 不改本文件任何 job 的行为,
+  # push / pull_request / 手工触发三条入口照旧。
+  workflow_call:
   push:
     branches: [main]
   pull_request:

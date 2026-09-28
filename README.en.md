@@ -34,10 +34,14 @@ It never touches the game process.
 > **GPL-3.0**, with every local feature intact. The two are independent and coexist on one
 > machine (separate install directories, data directories and autostart entries).
 >
-> **This repository publishes no Release binaries.** For a binary, use the website; for a
-> **GPL-3.0-licensed** binary, [build one yourself](#building-a-release). The download on the
-> website is **not** a build of this repository's code — please do not redistribute it as
-> though it were the GPL version.
+> **This repository does publish Release binaries.** Bump the version in `config.py` and
+> push to `main`: [`.github/workflows/release.yml`](.github/workflows/release.yml) then runs the
+> full CI gate, builds on Windows, creates the Release and tags it, with
+> `CS2Customizer-Setup-<version>.exe` and its `.sha256` attached — that binary **is a build of
+> this repository's GPL-3.0 source**. See
+> [Publishing a Release](#publishing-a-release). The download on the
+> website is the closed-source commercial build and is **not** a build of this repository's code —
+> please do not redistribute it as though it were the GPL version.
 
 > **The user interface is in Simplified Chinese only.** There is no i18n layer yet — the app
 > ships Chinese strings throughout. This README is translated so you can evaluate the project,
@@ -253,13 +257,52 @@ python build_tools/build_release.py --mode onedir --no-obfuscate --without-bundl
 The Windows installer is built from `build_tools/installer.iss` with
 [Inno Setup](https://jrsoftware.org/isinfo.php).
 
-Pushing a `v*` tag (or a manual dispatch) runs
-[`.github/workflows/build-installer.yml`](.github/workflows/build-installer.yml), which performs
-the full build plus the Inno Setup compile on a Windows runner.
+### Publishing a Release
 
-It is a **gate on the packaging chain, not a distribution channel** — artifacts are retained for
-90 days for debugging and **never become a Release**. It exists because the packaging chain is
-itself a source of defects that `ci.yml` never touches: the onedir and onefile branches used to
+**Bump `VERSION` in `config.py` and push to `main`. That is the whole procedure.**
+
+```bash
+# 1) bump the version (single source of truth) and add the `## [new version]` section to CHANGELOG.md
+# 2) commit, push
+git push origin main
+```
+
+That push starts [`.github/workflows/release.yml`](.github/workflows/release.yml), which chains
+four stages:
+
+1. **preflight** (seconds): it asks GitHub whether a Release for `v<version>` already exists. If it
+   does, the run stops there — an ordinary push that does not bump the version never starts a
+   Windows runner at all;
+2. the `ci.yml` gate (ruff + the per-file test matrix + the three UI rulers) — nothing below runs
+   if it is red;
+3. `build-installer.yml` performs the full build plus the Inno Setup compile on a Windows runner
+   and computes the SHA256;
+4. the `publish` job takes the artifact from stage 3 and creates the GitHub Release, **with the
+   tag created on the commit that was just pushed** (`--target`), and the release notes taken from
+   the `## [version]` section of `CHANGELOG.md` (**it fails loudly if that section is missing**,
+   so an empty Release can never be published).
+
+Attached: `CS2Customizer-Setup-<version>.exe` and `CS2Customizer-Setup-<version>.exe.sha256`.
+
+Deliberate design choices — do not route around them:
+
+- **The trigger is the version, not the commit.** A given version is published once; to publish
+  again, bump `VERSION`. A downloadable build per commit would be a separate prerelease pipeline,
+  and it is not this one.
+- **One tag, one Release, and always the commit that was built.** The in-between state (a `v<version>`
+  tag exists remotely but has no Release) **fails loudly** instead of publishing anyway — otherwise
+  the page says "published" while the download is not the thing that was just built.
+- The packaging stage also verifies that a hand-pushed tag agrees with `VERSION` in `config.py`, so
+  no package is produced whose tag says v2.3.1 while its executable properties say 2.3.0.
+
+⚠️ Attachments are **not code signed**, so Windows SmartScreen reports an "unknown publisher".
+That is the unavoidable result of having no signing certificate, not a build problem. ⚠️ A
+published Release is publicly visible: retracting one means deleting the Release and the remote
+tag, and anything already downloaded stays downloaded.
+
+Running `build-installer.yml` on its own (manual dispatch) **does not** create a Release — its
+artifact is retained for 90 days for debugging. That standalone entry point exists because the
+packaging chain is itself a source of defects that `ci.yml` never touches: the onedir and onefile branches used to
 behave asymmetrically (onedir failed loudly while onefile silently produced an asset-less
 package), a release once carried the build machine's live config into the artifact, and a wrong
 AppId in the Inno script only surfaces after installation. Only a real build reveals these.

@@ -1,0 +1,169 @@
+# 发布流水线:**抬了版本号就自动发版**,不需要人工打 tag。
+#
+# 触发:`main` 每次 push(以及手工推 `v*` tag)。**不是每个 commit 都发**——
+# 发版的触发点是 `config.py` 的 `VERSION` 变了。preflight 作业会比对
+# "当前 VERSION" 和 "已经存在的 Release",一致就整条链路跳过。
+# 想每个 commit 都发,那是另一套东西(每个 commit 一个 prerelease 轨),
+# 需要单独开一条流水线,不要往这条里塞。
+#
+# 链路:preflight(要不要发,极便宜) -> ci(全量门禁) -> build(打包) -> publish(建 Release + 自动打 tag)
+# 两个上游以 `uses: ./.github/workflows/<file>` 调用,复用的是同一条打包链路,不是复制一份——
+# 复制的那份会独立腐烂,而且只有副本被修。
+#
+# ⚠️ ci 作业在**同一次 push** 上会和独立的 ci.yml 重复跑一遍。这是故意的取舍:
+#   "等 CI 跑完再接力"那类接法要处理重跑、过期、跨 workflow 传状态,复杂度远高于它省下
+#   的那点机时;而重复只发生在**真的要发版**的那几个 commit 上。平时不抬版本的 push
+#   由 preflight 直接短路,一次 Windows runner 都不起。
+#
+# ⚠️ 附件没有代码签名,Windows SmartScreen 会报"未知发布者"。这是没有签名证书的必然
+#    结果,不是构建问题。发布说明末尾会自动带这一句。
+# ⚠️ Release 由 GITHUB_TOKEN 创建,它顺带建的 tag **不会再触发本流水线**
+#    (GitHub 不为 GITHUB_TOKEN 产生的事件再触发 workflow),所以这里不会自激。
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+
+# 顶层收敛为只读,只有 publish 这个 job 提权。
+permissions:
+  contents: read
+
+# 同一个 ref 不并发跑两遍。不取消进行中的发布:取消到一半会留下有 Release 没附件的状态。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 0) 要不要发版。ubuntu + 一个正则 + 一次 API 调用,几秒钟。
+  #    这一步存在的理由:不抬版本的 push 不该起一台 Windows runner 跑十分钟 PyInstaller。
+  preflight:
+    name: 这次要不要发版
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: 比对 config.VERSION 与已存在的 Release
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver=$(python3 -c "import re,io;print(re.search(r'^VERSION\s*=\s*\"([^\"]+)\"',io.open('config.py',encoding='utf-8').read(),re.M).group(1))")
+          echo "config.VERSION=$ver   head=$GITHUB_SHA"
+
+          if gh release view "v$ver" >/dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::v$ver 已经发过 Release,这次不重发。同一个 tag 建不出第二个 Release,内容也不会变 —— 要发新版本就改 config.py 的 VERSION 再 push。"
+            exit 0
+          fi
+
+          # tag 在、Release 不在:这是**需要人看一眼**的中间态。放着不管的话,
+          # gh release create 会把新 Release 挂到那个不知道指向哪里的旧 tag 上,
+          # 页面显示"已发布"、下载到的却不是这次构建的东西。
+          if git ls-remote --exit-code --tags origin "refs/tags/v$ver" >/dev/null 2>&1; then
+            echo "::error::远端已有 tag v$ver 但它没有对应的 Release。直接发会把新 Release 挂到一个指向未知提交的旧 tag 上。⇒ 先删掉那个 tag,或者把 config.py 的 VERSION 改成一个新的。"
+            exit 1
+          fi
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "::notice::v$ver 还没发过,继续走 CI -> 打包 -> 发版"
+
+  # 1) 全量门禁:ruff + 逐文件测试矩阵 + UI 三把尺子。红了后面两步都不跑。
+  ci:
+    needs: preflight
+    if: needs.preflight.outputs.should_release == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  # 2) 打包:PyInstaller onedir + Inno Setup 编译安装包,算 SHA256,传 artifact。
+  build:
+    needs: [preflight, ci]
+    if: needs.preflight.outputs.should_release == 'true'
+    uses: ./.github/workflows/build-installer.yml
+
+  # 3) 建 Release + 传附件 + 自动打 tag。
+  publish:
+    name: 建 Release 并上传安装包
+    needs: [preflight, build]
+    if: needs.preflight.outputs.should_release == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # 真正的版本号只认 preflight 读出来的那一个。此刻 tag 还不存在,
+      # 所以不能再从 GITHUB_REF_NAME 反推版本(旧设计是那么做的)。
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      # 第三方 action 一律按 commit SHA 固定,理由见 ci.yml。
+      # download-artifact 固定在 v4 线(与 upload-artifact v4 同代):artifact 格式按大版本走,
+      # 跨大版本取件有风险,而 v4.3.0 已被现有 artifact 格式实测覆盖。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # 不把凭据留在 .git/config 里:这个 job 的写权限只给 gh 用(GH_TOKEN),
+          # 没必要让 checkout 顺手也拿到一份可写凭据。
+          persist-credentials: false
+
+      - name: 下载安装包产物
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: installer
+          path: dist
+
+      - name: 确认产物齐全
+        shell: bash
+        run: |
+          ls -l dist
+          test -n "$(ls dist/*.exe 2>/dev/null)" || { echo "::error::dist 里没有 .exe 安装包"; exit 1; }
+          # 找不到就是上传/取件环节坏了,不能拿空附件去建 Release(那会留下一个看起来
+          # 发布成功、下载却 404 的 Release)。
+          test -n "$(ls dist/*.sha256 2>/dev/null)" || { echo "::error::dist 里没有 .sha256"; exit 1; }
+
+      - name: 从 CHANGELOG 抽本版本的发布说明
+        # 发布说明的唯一真源是 CHANGELOG.md,不是 tag 注释、不是手写文案。
+        # 抽不到就响亮失败:抬了版本号却没写更新日志,发出去的就是一个空 Release。
+        shell: bash
+        env:
+          # runner 的默认 locale 是 en-US(控制台编码 cp1252)。不钉 UTF-8 的话,
+          # 这段中文 print 到重定向文件时会 UnicodeEncodeError 或写出一堆乱码,
+          # 也就是"发布说明变乱码但流程照样绿"。同 ci.yml 里的同名设置。
+          PYTHONIOENCODING: utf-8
+        run: |
+          python - "$VERSION" <<'PY' > release-notes.md
+          import io, re, sys
+          ver = sys.argv[1]
+          text = io.open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(r"^## \[%s\][^\n]*\n(.*?)(?=^## \[|\Z)" % re.escape(ver), text, re.M | re.S)
+          if not m:
+              sys.exit("CHANGELOG.md 里没有 `## [%s]` 小节 —— 先补更新日志再发版。" % ver)
+          print("## CS2 Customizer %s\n" % ver)
+          print(m.group(1).strip())
+          print("\n---\n")
+          print("本安装包**没有代码签名**,Windows SmartScreen 会提示\"未知发布者\","
+                "选\"更多信息 → 仍要运行\"即可。这是没有签名证书的必然结果。")
+          PY
+          cat release-notes.md
+
+      - name: 建 Release、打 tag、上传附件
+        shell: bash
+        run: |
+          # --target:tag 不存在时由 gh 在**当前这次 push 的提交**上建出来,
+          # 所以 Release 和二进制一定对应同一份代码(用 GITHUB_SHA,不是默认分支的头)。
+          # 这里刻意不用 --verify-tag:此刻 tag 正是要建的东西,先验后建是死循环。
+          gh release create "v$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "CS2 Customizer $VERSION" \
+            --notes-file release-notes.md \
+            dist/*.exe dist/*.sha256
+          echo "----"
+          gh release view "v$VERSION"

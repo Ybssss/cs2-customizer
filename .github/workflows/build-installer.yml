@@ -1,7 +1,12 @@
-# 打包链路的门禁。**它不发布 Release。**
+# 打包链路的门禁。**它自己不发布 Release。**
 #
-# 面向终端用户的安装包走官网（闭源商业版，需注册；地址见 README 顶部）。
-# 本仓库不做二进制分发渠道——想要 GPL-3.0 授权的二进制，自己按 README 编译。
+# 发版走 .github/workflows/release.yml：那条流水线先跑 ci.yml 求全绿，再 `uses:` 调用本
+# 流水线打包，拿这里的 artifact 去建 Release。职责分开是因为写权限（contents: write）
+# 不该和"要跑 PyInstaller / Inno / choco install 的构建"共用一张令牌。
+# 手工推 v* tag 触发本流水线时，产物仍然只留 90 天 artifact，不建 Release。
+#
+# 面向终端用户的闭源商业版安装包走官网（需注册；地址见 README 顶部）。
+# Release 里的 exe 就是本仓库这份 GPL-3.0 源码的构建产物。
 #
 # 那为什么还留这条流水线？因为**打包链路自己就是一类缺陷的产地**，而 ci.yml 不碰它：
 #   - PyInstaller 的 onedir / onefile 两条分支行为不对称（历史上 onedir 会炸而
@@ -17,6 +22,9 @@
 name: build-installer
 
 on:
+  # 被 release.yml 调用来产出发版附件。走这条入口时 github.ref 仍然是 tag,
+  # 所以下面那道 "tag 与 config.py 的 VERSION 必须一致" 的校验照样生效。
+  workflow_call:
   push:
     tags:
       - "v*"
