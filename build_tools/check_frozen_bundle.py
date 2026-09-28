@@ -66,11 +66,18 @@ def top_level_names(listing: str) -> set[str]:
         line = raw.strip()
         if not line or line.startswith(("Options", "Contents of")):
             continue
-        # 子模块是 `pkg\mod.pyd` / `pkg\__init__.py` / `mod.py`；顶层目录名是 `pkg`
-        head = line.replace("/", "\\").split("\\")[0]
-        m = _PYI_TOP.match(head)
-        if m:
-            names.add(m.group(0).lower())
+        # 一条记录可能是 `pkg`（目录）、`pkg\__init__.py`、`win32\win32api.pyd`、
+        # `mod.py`。
+        # ⭐ 两个都要记：目录名**和**文件名主干。pywin32 的扩展就只以
+        # `win32\win32api.pyd` 这种形式出现——只记目录名的话，会得出"win32 在、
+        # win32api 不在"，于是一个**完全正确**的产物被判成缺包（第一次版本就错在这：
+        # 目录分隔符是 2026-09-28 实跑 run 36424381580 的日志里看出来的）。
+        parts = line.replace("/", "\\").split("\\")
+        for part in parts:
+            stem = part.rsplit(".", 1)[0] if "." in part else part
+            m = _PYI_TOP.match(stem)
+            if m:
+                names.add(m.group(0).lower())
     return names
 
 

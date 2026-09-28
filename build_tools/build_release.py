@@ -67,6 +67,19 @@ BASE_HIDDEN_IMPORTS = [
     # v5 Phase 5: icon 系统
     "qtawesome",
     "qtpy",
+    # pywin32：这些是 C 扩展，装在 site-packages/win32/ 下，靠 .pth 进 sys.path。
+    # 收进产物要靠 pywin32_module_dir() 把那个目录加进 pathex，列在这里是第二道保险
+    # （也让"为什么单独列这一串"在文件里说得清）。
+    "pywintypes",
+    "pythoncom",
+    "win32api",
+    "win32con",
+    "win32event",
+    "win32file",
+    "win32gui",
+    "win32process",
+    "win32security",
+    "win32service",
 ]
 
 EXCLUDES = [
@@ -736,6 +749,14 @@ coll = COLLECT(
 
     block = onefile_block if mode == "onefile" else onedir_block
 
+    # pywin32 的 .pyd 在一个靠 .pth 加进来的独立目录里，不告诉 PyInstaller 去那儿找，
+    # 它就一个都收不到（详见 pywin32_module_dir 的 docstring）。
+    pw32_dir = pywin32_module_dir()
+    pywin32_pathex = "" if pw32_dir is None else f", {str(pw32_dir)!r}"
+    if pw32_dir is None:
+        print("[WARN] 找不到 pywin32 的扩展模块目录（site-packages/win32）。"
+              "如果产物缺少 win32api / win32gui / win32process，就是这个原因。")
+
     return f"""# -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
@@ -760,7 +781,7 @@ datas = [
 
 a = Analysis(
     [{str(stage_dir / 'main_widget.py')!r}],
-    pathex=[{str(stage_dir)!r}],
+    pathex=[{str(stage_dir)!r}{pywin32_pathex}],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
@@ -780,6 +801,33 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 {stable_splash_class}
 {block}
 """
+
+
+def pywin32_module_dir() -> Path | None:
+    """定位 pywin32 的扩展模块目录（`site-packages/win32`），找不到返回 None。
+
+    pywin32 把它的 `.pyd` 放在一个**独立目录**里，安装时写一个 `.pth` 把那个目录
+    加进 `sys.path`。而 **PyInstaller 的 Analysis 不执行 `.pth`**，所以它的搜索路径里
+    根本没有那个目录 —— 于是哪怕源码里明明白白写着 `import win32gui`，那些 `.pyd`
+    也**不会**被收进产物。
+
+    2026-09-28 实测（run 36424381580 第 7 步，产物核对报缺 win32api / win32gui /
+    win32process）：把这个目录加进 spec 的 `pathex` 之后，四个模块连同 PyInstaller
+    自己的 `pyi_rth_pywintypes` 运行时钩子一起进包。**这是实测结论，不是照文档推断。**
+
+    定位方式用 `find_spec` 而不是硬编码路径：pip 的安装布局在不同 Python / pip
+    版本下会变，写死 `site-packages\\win32` 就是给自己埋一个换机器就炸的雷。
+    """
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("win32api")
+    except Exception:                                    # pragma: no cover
+        return None
+    if spec is None or not spec.origin:
+        return None
+    directory = Path(spec.origin).parent
+    return directory if directory.is_dir() else None
 
 
 def verify_onefile_archive(exe_path: Path, require_bundled_assets: bool = False) -> None:

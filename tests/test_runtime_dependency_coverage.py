@@ -215,6 +215,55 @@ Contents of 'app.exe' (PKG/CArchive):
     assert missing == {"flask"}, f"应当只报 flask 缺失，实际报了 {sorted(missing)}"
 
 
+def test_bundle_parser_sees_nested_pywin32_entries():
+    """`win32\win32api.pyd` 要算作 **win32api** 在，而不是只有目录名 win32。
+
+    ⭐ 第一次版本只取路径第一段，于是 pywin32 的扩展（它们只以
+    `win32\win32api.pyd` 这种形式出现）被判成缺失——**一个完全正确的产物会被判红**。
+    这和之前几次同形：判据量错了东西，看起来却像判据在工作。目录名与文件名主干
+    都要记。
+    """
+    listing = (
+        "Options in 'app.exe' (PKG/CArchive):\n"
+        " pyi-contents-directory _internal\n"
+        "Contents of 'app.exe' (PKG/CArchive):\n"
+        " struct\n"
+        " win32\\win32api.pyd\n"
+        " win32\\win32gui.pyd\n"
+        " win32\\win32process.pyd\n"
+        " pywintypes\n"
+        " pywin32_system32\\pywintypes311.dll\n"
+    )
+    names = bundle.top_level_names(listing)
+    must_scan(names, "合成清单里解析出的名字", least=4)
+    for expected in ("win32", "win32api", "win32gui", "win32process", "pywintypes"):
+        assert expected in names, f"{expected} 没被解析出来，实际 {sorted(names)}"
+    # 目录名与文件名主干都要在：只给其中之一，就会在另一种布局上误判
+    assert "win32" in names and "win32api" in names
+
+
+def test_build_puts_the_pywin32_extension_dir_on_the_analysis_path():
+    """构建必须把 pywin32 的扩展目录加进 spec 的 `pathex`。
+
+    ⭐ pywin32 把 `.pyd` 装在 `site-packages/win32/` 下，靠一个 `.pth` 把那个目录加进
+    `sys.path`；**PyInstaller 的 Analysis 不执行 `.pth`**，所以它的搜索路径里没有那个
+    目录 —— 于是源码里明写着 `import win32gui`，产物里也**没有**（2026-09-28 实测：
+    run 36424381580 第 7 步报缺 win32api / win32gui / win32process；把该目录加进
+    pathex 之后，四个模块连同 `pyi_rth_pywintypes` 一起进包）。
+
+    所以判据盯的是"有没有把这个目录交给 PyInstaller"，而不是"有没有写死某个路径"
+    ——写死路径在换机器 / 换 pip 版本时就会失效。
+    """
+    text = (ROOT / "build_tools" / "build_release.py").read_text(encoding="utf-8")
+    assert "pywin32_module_dir" in text, "build_release.py 里没有定位 pywin32 扩展目录的函数"
+    assert "pywin32_pathex" in text and "pathex=[{str(stage_dir)!r}{pywin32_pathex}]" in text, (
+        "spec 的 pathex 没有把 pywin32 的目录加进去 —— 产物会缺 win32api / win32gui / "
+        "win32process（PyInstaller 不执行 .pth）。"
+    )
+    for mod in ("pywintypes", "win32api", "win32gui", "win32process"):
+        assert f'"{mod}"' in text, f"hidden imports 里少了 {mod}"
+
+
 def test_bundle_check_reads_both_storage_locations(tmp_path):
     """onedir 的纯 Python 在 exe 的 PYZ 里，C 扩展在 `_internal/` —— 两处都要看。
 
