@@ -84,6 +84,12 @@ jobs:
         # 产物里带着素材（那是闭源版的前提），不加这个开关校验会直接拦下来。
         run: python build_tools/build_release.py --mode onedir --no-obfuscate --without-bundled-assets
 
+      - name: 核对产物里真的冻进了启动必需的模块
+        # ⚠ 事故 v2.3.1:依赖表对、CI 绿、构建也绿,唯独产物里没有 flask,用户双击即
+        # "No module named 'flask'"。前面所有判据量的是**声明**,这一条量的是**产物**——
+        # 只查一头,另一头照样能漏。放在 Inno 之前,坏产物在这里就停,不必编完安装包。
+        run: python build_tools/check_frozen_bundle.py
+
       - name: 安装 Inno Setup
         # 用 choco（windows runner 自带）而不是第三方 action：少一个供应链面。
         run: choco install innosetup --no-progress -y

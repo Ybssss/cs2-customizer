@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""打包装的那份依赖，必须覆盖程序**真正 import** 的每一个第三方包。
+"""打包装的那份依赖，必须同时覆盖**声明**和**产物**。
 
 **判据记下的是一次已经发出去的事故。** 2026-09-28，本仓库第一个成功发布的 Release
 （v2.3.1）双击即崩：
@@ -20,16 +20,19 @@
 主窗口启动 —— 缺 flask 不是"某个功能不可用"，是**程序根本起不来**。CI 全绿是因为它装的是
 那份抄了一遍的表。
 
-⭐ 这条判据防的不是"某一行依赖忘了写"，而是**"依赖清单和代码各有一份真相"**：
-清单不完整时，测试全绿、构建成功、产物照样发出去，只有用户双击时才炸。
-所以这里量的是**代码里 import 的东西**与**打包装的东西**这两个集合的差，而不是某一行文本。
+⭐ 所以这里有**四条**判据，而不是一条：依赖关系有两头，只查一头，另一头照样能漏。
+- `requirements.txt` / `requirements_qt.txt` 覆盖了代码的 import（**声明**）
+- 打包作业真的装了那份（**中间那一步**，v2.3.1 恰好漏在这里）
+- `check_frozen_bundle.py` 在打包后核对产物（**产物**，CI 里跑不到）
+- 运行时依赖只留一份清单，不许在 CI 那份里再抄一遍（**为什么会腐烂**）
 
-分母：必须真的扫到应用代码和依赖表（`must_scan`），否则两边都空，差集恒为空、判据恒绿。
+分母：必须真的扫到应用代码和依赖表（`must_scan`），否则两边都空、差集恒为空、判据恒绿。
 """
 from __future__ import annotations
 
-import ast
+import importlib.util
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,216 +41,39 @@ from _denominator import must_scan
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: 应用代码目录。build_tools/ 与 tests/ 不算——它们是构建期与测试期用的依赖。
-APP_DIRS = ("core", "pages", "widgets", "dialogs")
 
-#: import 名 → 发行包名。凡是"两者对不上"的都在这儿，一处写清，不散落在各处。
-#: ⚠ 这张表是**有意的例外清单**：pip 的发行名与 import 名不同名，靠自动匹配会漏。
-#: 每加一个别名都该问一句"能不能反过来让 import 名和发行名一致"。
-IMPORT_TO_DIST = {
-    "yaml": "PyYAML",          # import yaml, 装 PyYAML
-    "PIL": "pillow",           # import PIL, 装 pillow
-    "win32api": "pywin32",     # Windows 专用后端
-    "win32com": "pywin32",
-    "winreg": "pywin32",
-    "win32con": "pywin32",
-    "win32event": "pywin32",
-    "pywintypes": "pywin32",
-    "win32gui": "pywin32",
-    "win32process": "pywin32",
-    "win32file": "pywin32",
-    "win32service": "pywin32",
-    "winerror": "pywin32",
-    "win32ts": "pywin32",
-    "ntsecuritycon": "pywin32",
-    "win32security": "pywin32",
-    "pythoncom": "pywin32",
-    "websocket": "websocket-client",
-    "PySide6": "PySide6",     # 同名,列出来是为了让"这张表覆盖了全部非同名情况"可核对
-}
-
-#: 仓库内部模块/包名：它们由源码提供，不该出现在任何依赖表里。
-INTERNAL = {
-    "config", "utils", "resource_manager", "theme_manager", "service_urls",
-    "gsi_server", "gui_widget", "main_widget", "page_theme_helper",
-    "background_loader", "crosshair_animation", "crosshair_overlay",
-    "kill_icon_overlay", "kill_icon_player", "flash_process", "flash_process_manager",
-    "music_player", "music_control_bar", "voice_output_manager", "utility_display",
-    "utility_usage_tracker", "source_backup_manager", "screen_effect_overlay",
-    "ui_animations", "ui_design_system", "ui_effects", "ui_focus_underline",
-    "ui_help_panel", "ui_motion", "ui_osd", "ui_ripple_effect", "ui_shimmer",
-    "ui_slider_bubble", "ui_style_applier", "ui_toast", "ui_toggle_switch",
-    "ui_transitions", "gsi_handler_flash", "gsi_handler_fun", "gsi_handler_hud_color",
-    "gsi_handler_kills", "gsi_handler_music", "gsi_handler_sounds",
-    "gsi_handler_special", "gsi_handler_stats", "gsi_handler_utility",
-}
+def _load(name: str):
+    """按路径加载 build_tools 下的模块（那边不是包，本仓既有做法）。"""
+    path = ROOT / "build_tools" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"{name}_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def _dists_in(path: Path, seen: set[str] | None = None) -> set[str]:
-    """一份 requirements 文件里出现的发行包名（小写去分隔符），跟随 `-r` 递归。"""
-    seen = seen if seen is not None else set()
-    if path.name in seen:
-        return set()
-    seen.add(path.name)
-    names: set[str] = set()
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
-        if line.startswith(("-r ", "--requirement ")):
-            target = line.split(None, 1)[1].strip()
-            names |= _dists_in(path.parent / target, seen)
-            continue
-        name = re.split(r"[<>=!~;\[]", line, maxsplit=1)[0].strip()
-        if name:
-            names.add(name.lower().replace("_", "-"))
-    return names
-
-
-def _guards_imports(tree: ast.AST) -> set[int]:
-    """哪些 import 节点处在"缺了就降级"的 try 里。
-
-    ⭐ 这是本判据最要紧的一处区分，判错哪边都会造成真实损害：
-    - **没被守卫的** import = 硬依赖。缺了它程序起不来（`gsi_server.py:7` 的 flask 就是），
-      必须写进依赖表。
-    - **被守卫的** import = 有意的可选依赖。仓库里有一批：`mutagen`（取不到时长���信息，
-      music_player.py 走 try/except）、`mouse`（core/hotkeys/registry.py）、
-      `scipy`（voice_output_manager.py 的重采样，退化成线性插值）、`shiboken6`
-      （PySide6 自带，缺了只降级预热）、`pyi_splash`（only in a onefile bundle）、
-      `account_help`（开源裁剪时删掉了账号模块，这里显式 `except ImportError: pass`）。
-
-    把可选依赖塞进依赖表是**改变产品行为**：装上去就等于默认启用一条作者特意留了降级
-    路径的代码分支。反过来把硬依赖漏掉，就是 v2.3.1 那个装不起来的 exe。
-    """
-    guarded: set[int] = set()
-
-    def walk(node: ast.AST, inside_guard: bool) -> None:
-        for child in ast.iter_child_nodes(node):
-            flag = inside_guard
-            if isinstance(child, ast.Try) and _catches_import_error(child):
-                flag = True
-            if inside_guard and isinstance(child, (ast.Import, ast.ImportFrom)):
-                guarded.add(id(child))
-            walk(child, flag)
-
-    walk(tree, False)
-    return guarded
-
-
-def _catches_import_error(node: ast.Try) -> bool:
-    """这个 try 是否接住了 ImportError（裸 except 也算——它一样是"缺了就降级"）。"""
-    for handler in node.handlers:
-        exc = handler.type
-        names: list[str] = []
-        if exc is None:
-            return True                                  # 裸 except
-        if isinstance(exc, ast.Name):
-            names = [exc.id]
-        elif isinstance(exc, ast.Tuple):
-            names = [e.id for e in exc.elts if isinstance(e, ast.Name)]
-        if {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"} & set(names):
-            return True
-    return False
-
-
-def _imported_modules() -> set[str]:
-    """应用代码里所有**模块层、未被守卫**的 import 模块名。
-
-    ⭐ 为什么只算模块层：函数体里的 import 是**懒加载**。本项目页面本来就是懒加载的
-    （README：「侧栏 26 项，一页一文件，懒加载」），所以函数体里的 import 意味着
-    "用到那个功能时才会缺"——`weapon_row_widget._apply_theme_styles()` 里的
-    `shiboken6`、`magnifier_page` 里的 `mouse` 都属于这一类，它们是**特性级**依赖。
-
-    而 v2.3.1 那个事故是**模块层**的硬依赖：`gsi_server.py:7` 的
-    `from flask import Flask, request, jsonify` 在文件顶层，而 GSI 接收端由主窗口
-    启动 —— 缺它程序**根本起不来**。
-
-    判据要量的是"启动必需"，所以只算模块层。把懒加载的包也塞进依赖表是**改变产品
-    行为**：装上去就等于默认启用一条作者特意留了降级路径的分支。
-    """
-    files = [p for p in ROOT.glob("*.py")
-             if p.name not in ("setup.py",) and not p.name.startswith("test_")]
-    for d in APP_DIRS:
-        files.extend((ROOT / d).rglob("*.py"))
-    must_scan(files, "应用代码（根目录 + core/pages/widgets/dialogs）", least=50)
-
-    found: set[str] = set()
-    for path in files:
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except SyntaxError:                     # pragma: no cover - 只在源码坏掉时发生
-            continue
-        guarded = _guards_imports(tree)
-        for node in _module_level_nodes(tree):
-            if id(node) in guarded:
-                continue
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    found.add(alias.name.split(".")[0])
-            elif isinstance(node, ast.ImportFrom):
-                if node.level == 0 and node.module:   # 0 = 绝对导入；level>0 是包内相对导入
-                    found.add(node.module.split(".")[0])
-    must_scan(found, "应用代码里模块层且未被守卫的 import 模块名", least=10)
-    return found
-
-
-def _module_level_nodes(tree: ast.AST) -> list[ast.AST]:
-    """不在任何函数 / 类方法体里的节点（类体本身算模块层——那些 import 一样在导入时执行）。"""
-    out: list[ast.AST] = []
-
-    def walk(node: ast.AST) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                continue                      # 懒加载：不收
-            if isinstance(child, ast.ClassDef):
-                out.append(child)
-                walk(child)
-                continue
-            out.append(child)
-            walk(child)
-
-    walk(tree)
-    return out
-
-
-def _third_party(modules: set[str]) -> set[str]:
-    """把 import 名过滤成"第三方发行包名"的集合。"""
-    stdlib = set(sys.stdlib_module_names)
-    dists: set[str] = set()
-    for name in modules:
-        if name in stdlib or name in INTERNAL:
-            continue
-        if (ROOT / f"{name}.py").is_file() or (ROOT / name / "__init__.py").is_file():
-            continue                                   # 仓库自己的模块
-        dists.add(IMPORT_TO_DIST.get(name, name))
-    must_scan(dists, "应用依赖的第三方发行包", least=8)
-    return dists
+scan = _load("import_scan")
+bundle = _load("check_frozen_bundle")
 
 
 def test_third_party_imports_match_declared_dependencies():
-    """每个第三方 import 都必须能在**打包装的那份依赖**里找到。
+    """每个启动必需的 import 都必须能在**打包装的那份依赖**里找到。
 
     这条判据在本仓库已经晚了：它本该在 v2.3.1 发出去之前就红着。
-
-    ⚠ **它有一条真实的漏法，方向和直觉相反**：把硬依赖的 import 包进
-    `try/except ImportError`，这条判据就绿了——因为"被守卫的 import"按定义就是可选依赖。
-    这不是漏洞，是判据在如实反映代码的**声明**：代码说了"缺了也继续跑"，依赖表就该信它。
-    但要清楚那意味着什么——那是一条**降级路径**，不是修复：GSI 接收端会静默失效，
-    而 v2.3.1 的症状（起不来）会换成另一个更难查的症状。所以真要走这条路，
-    请在 PROGRESS.md 里写明"flask 变成可选"是有意为之，并说明缺它时程序如何表现。
     """
-    needed = _third_party(_imported_modules())
-    installed = _dists_in(ROOT / "requirements.txt") | _dists_in(ROOT / "requirements_qt.txt")
+    needed = scan.third_party_dists()
+    installed = scan.dists_in(ROOT / "requirements.txt") | scan.dists_in(ROOT / "requirements_qt.txt")
+    must_scan(needed, "应用启动必需的第三方发行包", least=8)
     must_scan(installed, "requirements.txt + requirements_qt.txt 提供的发行包", least=8)
 
     missing = {d for d in needed if d.lower().replace("_", "-") not in installed}
     assert not missing, (
-        f"程序 import 了这些包，而 requirements.txt / requirements_qt.txt 里没有："
+        f"程序启动时 import 了这些包，而 requirements.txt / requirements_qt.txt 里没有："
         f"{sorted(missing)}。\n"
         "只装 requirements_qt.txt 装不出一个能跑起来的程序——requirements_qt.txt 自己"
         "就写着「核心运行依赖在 requirements.txt 里」。缺 flask 的那次，产物照样打包成功、"
         "照样发成 Release，测试全绿，只有用户双击时才炸（v2.3.1）。\n"
-        f"⇒ 把这些包写进 requirements.txt，并在那里留一句它是干什么用的。"
+        "⇒ 把这些包写进 requirements.txt，并在那里留一句它是干什么用的。"
     )
 
 
@@ -269,6 +95,102 @@ def test_build_job_installs_the_runtime_dependency_set():
         "那份表才是运行时依赖（flask / pygame / 热键 / 音频 / pywin32），"
         "只装 requirements_qt.txt 冻出来的 exe 起不来（事故 v2.3.1）。"
     )
+
+
+def test_build_job_verifies_the_bundle_before_packaging():
+    """打包作业必须在编安装包**之前**真跑一次产物核对。
+
+    ⭐ 依赖与产物是两头：上一条量"装了什么"，这一条量"冻进去什么"——PyInstaller 漏收一个
+    hidden import 时，前一条照样全绿。
+
+    ⚠⚠ 这一格改过两次写法，两次都是**判据空转**：
+    1. 第一次拿 `iscc` 当"编译那一步"的锚点，而 D19 已把那个手搓调用换成
+       `build_release.py --installer-only`——锚点消失，位置比较退化成"小于文件末尾"，恒真。
+    2. 第二次全文搜 `check_frozen_bundle.py` 的位置，而**注释里也有这个字符串**，
+       于是"把命令改成 `echo later  # check_frozen_bundle.py`"照样绿。
+    ⇒ 所以这里解析 YAML，按**步骤顺序**找，并且要求那一步的 `run` **就是**这条调用
+    （前缀匹配，不接受尾部注释里挂着名字）。
+    """
+    import yaml
+
+    data = yaml.safe_load((ROOT / ".github" / "workflows" / "build-installer.yml").read_text(encoding="utf-8"))
+    steps = (data.get("jobs") or {}).get("build", {}).get("steps") or []
+    must_scan(steps, "build-installer.yml 的 build 作业步骤", least=5)
+
+    def index_of(predicate) -> int:
+        for idx, step in enumerate(steps):
+            if predicate(str(step.get("run", "")).strip()):
+                return idx
+        return -1
+
+    check_at = index_of(lambda run: run.startswith("python build_tools/check_frozen_bundle.py"))
+    assert check_at != -1, (
+        "build-installer.yml 里没有一步**真的执行** `python build_tools/check_frozen_bundle.py`。"
+        "依赖装对了不等于冻进去了——事故 v2.3.1 就是产物里没有 flask。"
+    )
+
+    anchor = "build_release.py --mode onedir --installer-only"
+    assert any(anchor in str(s.get("run", "")) for s in steps), (
+        f"找不到编译安装包那一步（锚点 {anchor!r}）。本条要量的是顺序，锚点没了就量不了。"
+    )
+    compile_at = index_of(lambda run: anchor in run)
+    assert check_at < compile_at, (
+        f"产物核对在第 {check_at + 1} 步、编译安装包在第 {compile_at + 1} 步——顺序反了。"
+        "坏产物应当在核对那一步就停，不必先把安装包编出来再失败。"
+    )
+
+
+def test_bundle_check_detects_a_missing_module():
+    """核对脚本本身：产物里少一个模块就必须报出来。
+
+    ⭐ 这条是给**判据本身**做判据。事故那次的教训是"检查全绿"和"检查根本没看对地方"
+    在报告上长得一模一样，所以这里喂一份**已知缺包**的合成清单，确认它会红。
+    """
+    required = {"flask", "pygame", "yaml"}
+    present = """Options in 'app.exe' (PKG/CArchive):
+ pyi-contents-directory _internal
+Contents of 'app.exe' (PKG/CArchive):
+ struct
+ yaml
+ yaml\\_yaml.cp311-win_amd64.pyd
+ pygame
+"""
+    names = bundle.top_level_names(present)
+    must_scan(names, "合成清单里解析出的顶层名", least=2)
+    assert "yaml" in names and "pygame" in names
+    assert "flask" not in names, "解析把 flask 读出来了，而清单里没有它"
+    missing = {name for name in required if name not in names}
+    assert missing == {"flask"}, f"应当只报 flask 缺失，实际报了 {sorted(missing)}"
+
+
+def test_bundle_check_reads_both_storage_locations(tmp_path):
+    """onedir 的纯 Python 在 exe 的 PYZ 里，C 扩展在 `_internal/` —— 两处都要看。
+
+    只看其中一处，就会对另一种包给出假红；而在 v2.3.1 那种"缺包"的事故里，
+    假红至少是吵的，**假绿是致命的**。
+    """
+    internal = tmp_path / "_internal"
+    (internal / "win32api").mkdir(parents=True)
+    (internal / "win32api" / "win32api.pyd").write_bytes(b"x")
+    (internal / "soundfile").mkdir(parents=True)
+    (internal / "soundfile" / "soundfile.pyd").write_bytes(b"x")
+    found = bundle.internal_top_level(internal)
+    must_scan(found, "_internal 里的顶层名", least=2)
+    assert found == {"win32api", "soundfile"}, found
+
+
+def test_bundle_check_refuses_to_pick_between_several_builds(tmp_path):
+    """`release/` 下有多个候选时必须失败，而不是挑一个。
+
+    挑一个就意味着可能核到**上一版的产物**，然后给出一个关于错误包名的结论——
+    而报告里看不出核的是哪个。
+    """
+    for name in ("CS2 Customizer 2.3.0", "CS2 Customizer 2.3.1"):
+        d = tmp_path / "release" / name
+        d.mkdir(parents=True)
+        (d / "CS2 Customizer.exe").write_bytes(b"x")
+    with pytest.raises(RuntimeError, match="多于一个"):
+        bundle.find_exe(tmp_path)
 
 
 def test_runtime_dependencies_are_declared_in_exactly_one_place():
@@ -310,4 +232,6 @@ def test_the_file_requirements_qt_points_at_exists():
 
 
 if __name__ == "__main__":  # pragma: no cover
-    print(sorted(_third_party(_imported_modules())))
+    print(sorted(scan.third_party_dists()))
+    r = subprocess.run([sys.executable, str(ROOT / "build_tools" / "check_frozen_bundle.py")])
+    raise SystemExit(r.returncode)

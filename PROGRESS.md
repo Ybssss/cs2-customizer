@@ -6,7 +6,16 @@
 > planned, what was tried and rejected, and which claims in the code and in older documents are already
 > known to be wrong. Read it, then verify the specific claim you are about to rely on, in source.
 >
-> **Latest state (2026-09-28, eighth pass):** The pipeline **finally published** — and the exe it
+> **Latest state (2026-09-28, ninth pass):** Broken Release **v2.3.1 was deleted** (release + remote
+> tag, owner-approved) and the dependency hole is closed: `requirements.txt` added,
+> `requirements-ci.txt` references it instead of duplicating it, packaging installs it. On top of
+> that there is now a check that inspects the **built artifact** — `check_frozen_bundle.py` lists
+> the exe's embedded archive with PyInstaller's `archive_viewer` and requires every startup-critical
+> module to be present in the exe or in `_internal/`, wired into `build-installer.yml` before the
+> installer compile (D26). Owner also chose: no timeout-based "did the exe stay alive" check, because
+> an unhandled exception pops a **modal** dialog on Windows and the process then hangs — which would
+> pass the very check meant to catch it. Because `VERSION` is still 2.3.1 and no Release exists, the
+> next push re-publishes **v2.3.1** with the fixed, bundle-verified build. Earlier in this pass: The pipeline **finally published** — and the exe it
 > published does not run. The owner launched it and got `Failed to execute script 'main_widget' … No
 > module named 'flask'`. Root cause is structural, not a missing line: `requirements_qt.txt` says in
 > its own comments that the core runtime deps live in **`requirements.txt`** — that file was never
@@ -144,6 +153,7 @@ Mark items the owner delegated to the agent as _(delegated)_.
 | **D12** | Release notes and the tag name take their version from `needs.preflight.outputs.version`, never from `GITHUB_REF_NAME`. | At publish time the tag does not exist yet, so there is no ref name to derive a version from. |
 | **D14** | The `ci` gate job carries its own `concurrency`: group `release-gate-${{ github.ref }}`, `cancel-in-progress: false`, and **no `github.workflow` in the group**. | Fixes the self-cancelling gate of entry 4. The invariant is "the gate's group must not depend on `github.workflow`", because in a reusable call that value is not ours to control. |
 | **D17** | **Supersedes D14.** The real fix is in **`ci.yml`**: its `concurrency.group` now uses `${{ github.workflow_ref }}-${{ github.ref }}` (the *caller's* workflow path) instead of `${{ github.workflow }}-${{ github.ref }}`. The caller-side `concurrency` from D14 is **removed** — two mechanisms overlap, and D14 demonstrably did not work. | D14 was tried and disproved by run 36402772836, which failed identically with D14 in place. Invariant, now guarded by a test: a workflow that gets reused must not key its concurrency group on `github.workflow`. |
+| **D26** | The packaging job runs `build_tools/check_frozen_bundle.py` **before** compiling the installer: it lists the built exe's embedded archive via PyInstaller's `archive_viewer -r -b` and requires every module from the shared import scan to be present, in the exe **or** in the sibling `_internal/`. | A dependency relationship has two ends and the CI suite can only see one. Deciding **against** a "did the exe stay alive for 20 seconds" smoke test: an unhandled exception on Windows opens a modal crash dialog, the process then hangs waiting for a click, so "did not exit" is exactly what a crash looks like — the check would pass the defect it was built for. The archive listing was validated against a real one-file build before being relied on. |
 | **D24** | The core runtime dependencies live in a new **`requirements.txt`**, which `requirements_qt.txt` already referred to; `requirements-ci.txt` references it instead of listing those packages a second time; the packaging job installs it. | The first published Release (v2.3.1) could not start: `No module named 'flask'`. The dependency was not missing from the *code*, it was missing from the *packaging input* — and CI stayed green precisely because the list had been copied in two places. |
 | **D25** | A test walks the app's **module-level, unguarded** imports and requires every one to be declared in `requirements_qt.txt` + `requirements.txt`, and requires the packaging job to install that set. | The gap that shipped a broken binary. Deliberately scoped to module-level unguarded imports: a function-body import is lazy (this app lazy-loads pages), and a `try/except`-guarded import is an intentional optional dependency — declaring those would change product behaviour by enabling fallback paths the author left disabled. Recorded limitation: guarding a hard import turns this test green while only converting a crash into a silent degradation. |
 | **D21** | The Simplified Chinese Inno translation is **bundled** at `build_tools/Languages/ChineseSimplified.isl` (MIT, kira-96) and `installer.iss` references it script-relatively instead of via `compiler:`. | `compiler:` resolves against the **compiler's own** Languages folder, which official Inno Setup does not populate with Simplified Chinese, so the build depended on what the machine happened to have (run 36414070599, line 72). Owner's decision: bundle it. |
@@ -633,6 +643,61 @@ pygame / sounddevice / numpy / pywin32" as an argument *against* using it — th
 incidental noise, it was the symptom: the packaging job was installing a set that cannot run the
 app, and I read the extra packages as a reason to avoid them rather than as evidence of the hole.
 
+### ✅ Entry 11: Delete the broken v2.3.1, and check the artifact instead of the list (2026-09-28)
+
+**What / why.** Two owner decisions on the back of entry 10. (1) Delete the broken Release.
+(2) Add a check that actually looks at the built exe. Both are now done; the first one changed
+public state.
+
+**Deleted (irreversible).** `gh release delete v2.3.1 --cleanup-tag`: the Release and the remote tag
+are gone; the Releases page is empty again. Anyone who had already downloaded the installer still has
+it. The pipeline did exactly what it was built to do — the artifact was simply wrong, and no amount of
+workflow work would have caught that, which is the point of this entry.
+
+**The artifact check.** `build_tools/import_scan.py` (new) is the single implementation of "which
+third-party modules does this app need to start": module-level, unguarded, non-stdlib, non-internal.
+`build_tools/check_frozen_bundle.py` (new) lists the built exe's embedded archive with PyInstaller's
+own `archive_viewer -r -b` and requires each of those modules to be present — in the exe's PYZ **or**
+in the sibling `_internal/`, because onedir keeps C extensions outside the exe. It runs in
+`build-installer.yml` right after the onedir build, before Inno Setup, so a bad product stops there.
+
+**Why not a "launch the exe" smoke test — the reason is worth keeping.** An unhandled exception in a
+frozen Windows app opens a **modal** crash dialog (the one in the owner's screenshot) and the process
+then *hangs* waiting for a click. A timeout-based check ("the exe is still alive after 20 seconds")
+therefore returns **green for exactly the crash it was written to catch**. Waiting for the process to
+*exit* would be worse: a clean launch also doesn't exit. Getting a real smoke test means adding a
+headless self-check entry point to the app, which is app work, not build work — recorded as the
+honest limit of this approach rather than faked with a timeout.
+
+**Changed.** `build_tools/import_scan.py`, `build_tools/check_frozen_bundle.py` (both new);
+`.github/workflows/build-installer.yml` (the check step); `tests/test_runtime_dependency_coverage.py`
+4 → 8 cases, now importing the shared scanner instead of carrying its own copy.
+
+**Decision(s).** D26, plus D24/D25 from entry 10.
+
+**Verified.** 8 passed; ruff clean. Six mutations go red: delete `flask` from the requirements,
+drop `-r requirements.txt` from the packaging job, remove the bundle-check step, move the bundle check
+after the installer compile, copy `flask` back into `requirements-ci.txt`, delete `requirements.txt`.
+Two mutations correctly stay green: wrapping the flask import in `try/except` (a guarded import is by
+definition optional — this converts a crash into a silent degradation, so it is a product decision, not
+a fix), and the archive-listing parser reading a synthetic listing.
+⚠ **One of my own mutations was faulty twice over, and the first version of the ordering assertion was
+a判据 that could never fail.** It compared positions of `check_frozen_bundle.py` and `iscc` in the raw
+file; D19 had already removed the `iscc` invocation, so the comparison degenerated to "position <
+end of file" — always true. The second attempt searched the raw text again, and the workflow's
+comments mention the script by name, so replacing the command with `echo later  # check_frozen_bundle.py`
+stayed green. It now parses the YAML, finds the step by **step order**, and requires that step's `run`
+to *be* the invocation (prefix match). ⚠⭐ **A judge that cannot fail is worse than no judge**, because
+it makes people believe something is being checked. This is the third family of that bug in this
+project after `_denominator.py` was written for the first one.
+**Not verified:** that a real build passes the bundle check. The archive listing format was validated
+against a real one-file build; the onedir layout, the `_internal/` half, and the whole check on a real
+product build are unproven until the next run.
+
+**Not done / open.** `PROGRESS.md` is now past 700 lines and needs compaction.
+
+**Supersedes.** Nothing.
+
 ---
 
 ## 4. Known drift and superseded claims
@@ -675,7 +740,7 @@ remembered from a superseded source is unverified until re-checked.
 | Changelog extraction | Local run of the embedded python for `2.3.1` and `9.9.9` | found / exit 1 | 2026-09-28 |
 | Mutation checks on `release.yml` | drop `build`/`ci` `if:` · `--target` -> `main` · always-release · drop `gh release view` | each red; restore green | 2026-09-28 |
 | Full test matrix | `python build_tools/run_tests.py` | **not run** — needs pytest on the project interpreter | — |
-| **Published Release** | launch the v2.3.1 exe | **`No module named 'flask'` — the artifact does not run.** Fixed by D24, not yet rebuilt | 2026-09-28 |
+| **Published Release** | launch the v2.3.1 exe | **`No module named 'flask'` — the artifact did not run.** Release + tag deleted (owner-approved); fix D24/D25/D26 in, not yet re-run | 2026-09-28 |
 | Real release run | run 36415053429 | **success** — Release v2.3.1 created with the installer attached | 2026-09-28 |
 | Earlier release runs | `gh run view 36401751401`, `36402772836` | **failed twice**, identically: preflight ok, `ci` job never created, build/publish skipped, no Release. D14 did not fix it | 2026-09-28 |
 | Real release run, after D17 | run 36403249454 (head 27b53ff) | gate **started** (`ci / test`, `ci / ui-audit`) with the standalone ci unaffected — D17 confirmed. Then packaging failed: `No module named pytest` | 2026-09-28 |
