@@ -49,8 +49,18 @@ on:
 permissions:
   contents: read
 
+# ⚠⚠ group 里用的是 `github.workflow_ref`（**调用方**的 workflow 文件路径），不是
+# `github.workflow`。这不是风格问题，是一次真实事故（2026-09-28，release run
+# 36401751401 / 36402772836）：release.yml 用 `uses:` 调用本文件当发版门禁，而**被调用**的
+# workflow 里 `github.workflow` 解析成的是**被调用方**的名字（`ci`）。于是同一次 push 上
+# 独立跑的那条 ci 和发版门禁落进同一个 group，`cancel-in-progress: true` 让它们互相取消：
+# 现象是门禁那个作业**连作业记录都不产生**，build / publish 变成 skipped，整条 run 记
+# failure，而且没有任何错误信息。改 group 的名字没用——两条 run 都是 ci.yml 跑的，
+# 只有"调用方是谁"能把它们分开，而 `github.workflow_ref` 正是这个信息
+# （本文件 = .../ci.yml，被 release 调用时 = .../release.yml）。
+# 踩坑记在这里：**给"会被复用的 workflow"写并发组时，不要用 github.workflow。**
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow_ref }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

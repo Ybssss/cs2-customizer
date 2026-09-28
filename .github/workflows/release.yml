@@ -86,21 +86,13 @@ jobs:
   ci:
     needs: preflight
     if: needs.preflight.outputs.should_release == 'true'
-    # ⚠⚠ 这一段是被一次真实事故逼出来的,别删。
-    # 首次运行(2026-09-28,run 36401751401)的现象是:preflight 成功,而这个作业**连作业
-    # 记录都没产生**,build / publish 变成 skipped,整条 run 记 failure。actionlint 说三个
-    # workflow 都合法,所以不是语法问题,是调度期被取消。
-    # 原因:ci.yml 自己带
-    #     concurrency: {group: ${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true}
-    # 而**被调用的** workflow 里 `github.workflow` 是谁的名字并不由我们决定(它可能是
-    # 调用方 `release`,也可能是被调方 `ci`)。取后者时,本作业和同一次 push 上独立跑的那条
-    # ci.yml 落进**同一个 concurrency group**,而 cancel-in-progress: true —— 于是发版这道
-    # 门禁把自己取消了。两条流水线同一秒启动,窗口正好对上。
-    # 修法:给这个调用作业一个**不依赖 github.workflow 的、只属于发版的** group。
-    # 写死前缀 + refs,两侧不可能再撞;cancel-in-progress: false,排队而不是互砍。
-    concurrency:
-      group: release-gate-${{ github.ref }}
-      cancel-in-progress: false
+    # ⚠ 这里曾经加过一个本作业级的 concurrency,想靠它和独立那条 ci 划开 group。
+    #   **没用**——起作用的是 ci.yml 自己的 group,而在被调用的 workflow 里
+    #   `github.workflow` 解析成的是被调用方的名字(ci),于是两条 run 撞进同一个 group
+    #   互相取消(事故 run 36401751401 / 36402772836:门禁作业连记录都不产生)。
+    #   真正的修法在 ci.yml:它的 group 改用 `github.workflow_ref`,那是**调用方**的
+    #   路径,两边天生不同。测试 tests/test_release_wiring.py 盯着这一条。
+    #   这里保持"不加",免得两套机制叠着,下次再猜是谁在起作用。
     uses: ./.github/workflows/ci.yml
 
   # 2) 打包:PyInstaller onedir + Inno Setup 编译安装包,算 SHA256,传 artifact。

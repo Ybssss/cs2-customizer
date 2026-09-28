@@ -157,36 +157,49 @@ def test_preflight_short_circuits_unreleased_pushes():
     )
 
 
-def test_release_gate_does_not_cancel_itself():
-    """发版这道门禁不能和独立那条 ci 落进同一个 concurrency group。
+def test_reused_workflow_concurrency_group_is_caller_specific():
+    """会被复用的 workflow,它的 concurrency group 不能只由 `github.workflow` 决定。
 
-    **这是判据记下的一次真实事故**，不是假想：首次运行（2026-09-28，run 36401751401）
-    的现象是 preflight 成功、这个作业**连作业记录都没产生**、build / publish 变成 skipped、
-    整条 run 记 failure。actionlint 对三份 workflow 都报合法，所以不是语法问题。
+    **这是判据记下的两次真实失败**，不是假想。第一次：run 36401751401；加了调用作业级
+    `concurrency` 之后：run 36402772836。两次现象一样——preflight 成功，门禁那个作业
+    **连作业记录都不产生**，build / publish 变成 skipped，整条 run 记 failure，没有任何
+    错误信息。actionlint 对三份 workflow 都报合法，所以不是语法问题。
 
-    成因：`ci.yml` 自带
-    `concurrency: {group: ${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true}`，
-    而**被调用的** workflow 里 `github.workflow` 是谁的名字不由我们决定。取到被调方 `ci`
-    时，这个调用作业和同一次 push 上独立跑的那条 ci.yml 落进同一个 group，
-    `cancel-in-progress: true` 于是把发版门禁自己取消了——两条流水线同一秒启动，窗口正好对上。
+    成因：`ci.yml` 原本写
+    `group: ${{ github.workflow }}-${{ github.ref }}` + `cancel-in-progress: true`。在
+    **被调用**的 workflow 里 `github.workflow` 解析成的是**被调用方**的名字（`ci`），
+    于是同一次 push 上独立跑的那条 ci 与发版门禁落进同一个 group，互相取消。佐证：
+    那次 push 的独立 ci run 的 conclusion 正是 `cancelled`。
 
-    真正的不变量不是「group 名字不一样」（那只是这次的症状），而是：
-    **发版门禁的 group 不能依赖 `github.workflow`**。那个值在可复用调用里不是我们能控制的。
+    ⚠ 修复第一次也踩空了：给**调用作业**加 `concurrency` 没用——起作用的是被调用文件
+    自己的 group。两条 run 都是 ci.yml 跑的，只有"调用方是谁"能把它们分开，而
+    `github.workflow_ref` 正是这个信息（本文件 vs release.yml）。
+
+    所以不变式落在**被调用文件**上：它的 group 必须认得出调用方。
     """
-    gate = _load(RELEASE)["jobs"]["ci"]
-    conc = gate.get("concurrency") or {}
+    conc = _load(CI).get("concurrency") or {}
     group = str(conc.get("group", ""))
-    assert group, (
-        "release.yml 调 ci.yml 的那个作业没有 concurrency —— "
-        "它会继承 ci.yml 自己的 group，而那个 group 由 github.workflow 决定"
+    assert group, "ci.yml 没有 concurrency：连续 push 会把 Windows runner 堆起来"
+    assert "github.workflow_ref" in group, (
+        f"ci.yml 的 concurrency group 是 {group!r}，没有用 github.workflow_ref。"
+        "被调用时 github.workflow 是被调用方的名字，两条 run 会落进同一个 group 互相取消"
+        "（事故 run 36401751401 / 36402772836）。"
     )
-    assert "github.workflow" not in group, (
-        f"发版门禁的 concurrency group 是 {group!r}，里面用了 github.workflow。"
-        "在可复用调用里那个值不是我们能控制的，会和独立那条 ci 撞进同一个 group "
-        "然后互相取消（事故 run 36401751401）。"
+    # 精确的不变量：不能用**裸的** github.workflow。workflow_ref 里也含 "workflow"，
+    # 所以判据要卡住的是 "${{ github.workflow }}" 这种不带 _ref 的引用。
+    assert "github.workflow }}" not in group and "github.workflow }}-" not in group, (
+        f"ci.yml 的 concurrency group 里出现了裸的 github.workflow（{group!r}）——"
+        "被调用时它解析成被调用方的名字。"
     )
-    assert conc.get("cancel-in-progress") is False, (
-        "发版门禁不该 cancel-in-progress：取消到一半会留下有 Release 没附件的状态。"
+    # 同一条流水线里仍然要能互相取消，否则连续 push 会把 runner 堆起来。
+    assert conc.get("cancel-in-progress") is True, (
+        "ci.yml 应当保留 cancel-in-progress: true —— 同一条流水线的旧 run 仍需要被取消"
+    )
+
+    # 调用方不再自带第二套并发机制：两套机制叠着，下次出问题没人说得清是谁在起作用。
+    assert "concurrency" not in (_load(RELEASE)["jobs"]["ci"]), (
+        "release.yml 的 ci 调用作业又加回了 concurrency。"
+        "曾经试过用它来划开 group，没用（那两次事故），留着只会让人以为它在起作用。"
     )
 
 
